@@ -81,17 +81,32 @@
 %%% monitor =     List of Pids requesting nodeup/nodedown
 %%%====================================================================================
 
+%% -record(state, {sync_state = no_conf        :: sync_state(),
+%% 		connect_all                 :: boolean(),
+%% 		group_name = []             :: group_name() | [],
+%% 		nodes = []                  :: [node()],
+%% 		no_contact = []             :: [node()],
+%% 		sync_error = [],
+%% 		other_grps = [], 
+%% 		node_name = node()          :: node(),
+%% 		monitor = [],
+%% 		publish_type = normal       :: publish_type(),
+%% 		group_publish_type = normal :: publish_type()}).
+
+
 -record(state, {sync_state = no_conf        :: sync_state(),
 		connect_all                 :: boolean(),
-		group_name = []             :: group_name() | [],
+		group_name = []             :: [group_name()],
 		nodes = []                  :: [node()],
 		no_contact = []             :: [node()],
-		sync_error = [],
-		other_grps = [], 
+		sync_error = []             :: [node()],
+		other_grps = []             :: [{group_name(), [node()]}],
+                own_grps =[]                :: [{group_name(), [node()]}],
 		node_name = node()          :: node(),
-		monitor = [],
+		monitor = []                :: [pid()],
 		publish_type = normal       :: publish_type(),
 		group_publish_type = normal :: publish_type()}).
+
 
 
 %%%====================================================================================
@@ -99,7 +114,7 @@
 %%%====================================================================================
 
 -spec s_groups() ->  {GroupName, GroupNames}  | undefined when
-              GroupName :: group_name(), GroupNames :: [GroupName].
+              GroupName ::[group_name()], GroupNames :: [GroupName].
 s_groups() ->
     request(s_groups).
 
@@ -170,7 +185,7 @@ ng_add_check(Node, PubType, OthersNG) ->
     request({ng_add_check, Node, PubType, OthersNG}).
 
 -type info_item() :: {'state', State :: sync_state()}
-                   | {'own_group_name', GroupName :: group_name()}
+                   | {'own_group_name', GroupName :: [group_name()]}
                    | {'own_group_nodes', Nodes :: [node()]}
                    | {'synched_nodes', Nodes :: [node()]}
                    | {'sync_error', Nodes :: [node()]}
@@ -269,7 +284,7 @@ init([]) ->
 			{DefGroupNameT, PubType, lists:delete(node(), DefNodesT), DefOtherT}
 		end,
 	    {ok, #state{publish_type = PT, group_publish_type = PubTpGrp,
-			sync_state = synced, group_name = DefGroupName, 
+			sync_state = synced, group_name = [DefGroupName], 
 			no_contact = lists:sort(DefNodes), 
 			other_grps = DefOther}}
     end.
@@ -307,7 +322,7 @@ handle_call(sync, _From, S) ->
 			register(s_group_check, Pid),
 			{DefGroupNameT, PubType, lists:delete(node(), DefNodesT), DefOtherT}
 		end,
-	    {reply, ok, S#state{sync_state = synced, group_name = DefGroupName, 
+	    {reply, ok, S#state{sync_state = synced, group_name = [DefGroupName], 
 				no_contact = lists:sort(DefNodes), 
 				other_grps = DefOther, group_publish_type = PubTpGrp}}
     end;
@@ -367,21 +382,24 @@ handle_call(own_nodes, _From, S) ->
 %%%
 %%% Get the registered names from a specified Node, or GlobalGroupName.
 %%%====================================================================================
-handle_call({registered_names, {group, Group}}, _From, S) when Group =:= S#state.group_name ->
-    Res = global:registered_names(),
-    {reply, Res, S};
 handle_call({registered_names, {group, Group}}, From, S) ->
-    case lists:keysearch(Group, 1, S#state.other_grps) of
-	false ->
-	    {reply, [], S};
-	{value, {Group, []}} ->
-	    {reply, [], S};
-	{value, {Group, Nodes}} ->
-	    Pid = global_search:start(names, {group, Nodes, From}),
-	    Wait = get(registered_names),
-	    put(registered_names, [{Pid, From} | Wait]),
-	    {noreply, S}
-    end;
+    case lists:member(Group, S#state.group_name) of 
+      true ->
+          Res = global:registered_names(),
+          {reply, Res, S};
+      false ->
+          case lists:keysearch(Group, 1, S#state.other_grps) of
+              false ->
+                  {reply, [], S};
+              {value, {Group, []}} ->
+                  {reply, [], S};
+              {value, {Group, Nodes}} ->
+                  Pid = global_search:start(names, {group, Nodes, From}),
+                  Wait = get(registered_names),
+                  put(registered_names, [{Pid, From} | Wait]),
+                  {noreply, S}
+          end
+  end;
 handle_call({registered_names, {node, Node}}, _From, S) when Node =:= node() ->
     Res = global:registered_names(),
     {reply, Res, S};
@@ -417,26 +435,28 @@ handle_call({send, Name, Msg}, From, S) ->
 	    {reply, Found, S}
     end;
 %% Search in the specified global group, which happens to be the own group.
-handle_call({send, {group, Grp}, Name, Msg}, _From, S) when Grp =:= S#state.group_name ->
-    case global:whereis_name(Name) of
-	undefined ->
-	    {reply, {badarg, {Name, Msg}}, S};
-	Pid ->
-	    Pid ! Msg,
-	    {reply, Pid, S}
-    end;
-%% Search in the specified global group.
-handle_call({send, {group, Group}, Name, Msg}, From, S) ->
-    case lists:keysearch(Group, 1, S#state.other_grps) of
-	false ->
-	    {reply, {badarg, {Name, Msg}}, S};
-	{value, {Group, []}} ->
-	    {reply, {badarg, {Name, Msg}}, S};
-	{value, {Group, Nodes}} ->
-	    Pid = global_search:start(send, {group, Nodes, Name, Msg, From}),
-	    Wait = get(send),
-	    put(send, [{Pid, From, Name, Msg} | Wait]),
-	    {noreply, S}
+handle_call({send, {group, Grp}, Name, Msg}, From, S) ->
+    case lists:member(Grp, S#state.group_name) of
+        true ->
+            case global:whereis_name(Name) of
+                undefined ->
+                    {reply, {badarg, {Name, Msg}}, S};
+                Pid ->
+                    Pid ! Msg,
+                    {reply, Pid, S}
+            end;
+        false ->
+            case lists:keysearch(Grp, 1, S#state.other_grps) of
+                false ->
+                    {reply, {badarg, {Name, Msg}}, S};
+                {value, {Grp, []}} ->
+                    {reply, {badarg, {Name, Msg}}, S};
+                {value, {Grp, Nodes}} ->
+                    Pid = global_search:start(send, {group, Nodes, Name, Msg, From}),
+                    Wait = get(send),
+                    put(send, [{Pid, From, Name, Msg} | Wait]),
+                    {noreply, S}
+            end
     end;
 %% Search on the specified node.
 handle_call({send, {node, Node}, Name, Msg}, From, S) ->
@@ -469,22 +489,24 @@ handle_call({whereis_name, Name}, From, S) ->
 	    {reply, Found, S}
     end;
 %% Search in the specified global group, which happens to be the own group.
-handle_call({whereis_name, {group, Group}, Name}, _From, S) 
-  when Group =:= S#state.group_name ->
-    Res = global:whereis_name(Name),
-    {reply, Res, S};
-%% Search in the specified global group.
+% Need to change!! HL.
 handle_call({whereis_name, {group, Group}, Name}, From, S) ->
-    case lists:keysearch(Group, 1, S#state.other_grps) of
-	false ->
-	    {reply, undefined, S};
-	{value, {Group, []}} ->
-	    {reply, undefined, S};
-	{value, {Group, Nodes}} ->
-	    Pid = global_search:start(whereis, {group, Nodes, Name, From}),
-	    Wait = get(whereis_name),
-	    put(whereis_name, [{Pid, From} | Wait]),
-	    {noreply, S}
+    case lists:member(Group, S#state.group_name) of
+        true ->
+            Res = global:whereis_name(Name),
+            {reply, Res, S};
+        false ->
+            case lists:keysearch(Group, 1, S#state.other_grps) of
+                false ->
+                    {reply, undefined, S};
+                {value, {Group, []}} ->
+                    {reply, undefined, S};
+                {value, {Group, Nodes}} ->
+                    Pid = global_search:start(whereis, {group, Nodes, Name, From}),
+                    Wait = get(whereis_name),
+                    put(whereis_name, [{Pid, From} | Wait]),
+                    {noreply, S}
+            end
     end;
 %% Search on the specified node.
 handle_call({whereis_name, {node, Node}, Name}, From, S) ->
@@ -526,7 +548,7 @@ handle_call({s_groups_changed, NewPara}, _From, S) ->
     %% will not be in any global group at all.
     force_nodedown(nodes(connected) -- NewNodes),
 
-    NewS = S#state{group_name = NewGroupName, 
+    NewS = S#state{group_name = [NewGroupName], 
 		   nodes = lists:sort(NN), 
 		   no_contact = lists:sort(lists:delete(node(), NNC)), 
 		   sync_error = lists:sort(NSE), 
@@ -574,7 +596,7 @@ handle_call({s_groups_added, NewPara}, _From, S) ->
 			    end
 		    end,
 		    {[], [], []}, lists:delete(node(), NewNodes)),
-    NewS = S#state{sync_state = synced, group_name = NewGroupName, nodes = lists:sort(NN), 
+    NewS = S#state{sync_state = synced, group_name = [NewGroupName], nodes = lists:sort(NN), 
 		   sync_error = lists:sort(NSE), no_contact = lists:sort(NNC), 
 		   other_grps = NewOther, group_publish_type = PubTpGrp},
     {reply, ok, NewS};
