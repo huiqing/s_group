@@ -18,7 +18,7 @@
 %%
 -module(s_group).
 
-%% Groups nodes into global groups with an own global name space.
+%% Groups nodes into s_groups with an own global name space.
 
 -behaviour(gen_server).
 
@@ -27,7 +27,7 @@
 -export([handle_call/3, handle_cast/2, handle_info/2, 
 	 terminate/2, code_change/3]).
 
--export([global_groups/0]).
+-export([s_groups/0]).
 -export([monitor_nodes/1]).
 -export([own_nodes/0]).
 -export([registered_names/1]).
@@ -35,9 +35,9 @@
 -export([send/3]).
 -export([whereis_name/1]).
 -export([whereis_name/2]).
--export([global_groups_changed/1]).
--export([global_groups_added/1]).
--export([global_groups_removed/1]).
+-export([s_groups_changed/1]).
+-export([s_groups_added/1]).
+-export([s_groups_removed/1]).
 -export([sync/0]).
 -export([ng_add_check/2, ng_add_check/3]).
 
@@ -68,9 +68,9 @@
                         [node()]}.
 
 %%%====================================================================================
-%%% The state of the global_group process
+%%% The state of the s_group process
 %%% 
-%%% sync_state =  no_conf (global_groups not defined, inital state) |
+%%% sync_state =  no_conf (s_groups not defined, inital state) |
 %%%               synced 
 %%% group_name =  Own global group name
 %%% nodes =       Nodes in the own global group
@@ -98,11 +98,10 @@
 %%% External exported
 %%%====================================================================================
 
--spec global_groups() -> {GroupName, GroupNames} | undefined when
-      GroupName :: group_name(),
-      GroupNames :: [GroupName].
-global_groups() ->
-    request(global_groups).
+-spec s_groups() ->  {GroupName, GroupNames}  | undefined when
+              GroupName :: group_name(), GroupNames :: [GroupName].
+s_groups() ->
+    request(s_groups).
 
 -spec monitor_nodes(Flag) -> 'ok' when
       Flag :: boolean().
@@ -151,14 +150,14 @@ whereis_name(Name) ->
 whereis_name(Group, Name) ->
     request({whereis_name, Group, Name}).
 
-global_groups_changed(NewPara) ->
-    request({global_groups_changed, NewPara}).
+s_groups_changed(NewPara) ->
+    request({s_groups_changed, NewPara}).
 
-global_groups_added(NewPara) ->
-    request({global_groups_added, NewPara}).
+s_groups_added(NewPara) ->
+    request({s_groups_added, NewPara}).
 
-global_groups_removed(NewPara) ->
-    request({global_groups_removed, NewPara}).
+s_groups_removed(NewPara) ->
+    request({s_groups_removed, NewPara}).
 
 -spec sync() -> 'ok'.
 sync() ->
@@ -207,17 +206,17 @@ request(Req, Time) ->
 %%%====================================================================================
 %%% gen_server start
 %%%
-%%% The first thing to happen is to read if the global_groups key is defined in the
-%%% .config file. If not defined, the whole system is started as one global_group, 
-%%% and the services of global_group are superfluous.
+%%% The first thing to happen is to read if the s_groups key is defined in the
+%%% .config file. If not defined, the whole system is started as one s_group, 
+%%% and the services of s_group are superfluous.
 %%% Otherwise a sync process is started to check that all nodes in the own global
 %%% group have the same configuration. This is done by sending 'conf_check' to all
 %%% other nodes and requiring 'conf_check_result' back.
-%%% If the nodes are not in agreement of the configuration the global_group process 
+%%% If the nodes are not in agreement of the configuration the s_group process 
 %%% will remove these nodes from the #state.nodes list. This can be a normal case
 %%% at release upgrade when all nodes are not yet upgraded.
 %%%
-%%% It is possible to manually force a sync of the global_group. This is done for 
+%%% It is possible to manually force a sync of the s_group. This is done for 
 %%% instance after a release upgrade, after all nodes in the group beeing upgraded.
 %%% The nodes are not synced automatically because it would cause the node to be
 %%% disconnected from those not yet beeing upgraded.
@@ -244,7 +243,7 @@ init([]) ->
 		 true
 	 end,
     PT = publish_arg(),
-    case application:get_env(kernel, global_groups) of
+    case application:get_env(kernel, s_groups) of
 	undefined ->
 	    update_publish_nodes(PT),
 	    {ok, #state{publish_type = PT,
@@ -258,7 +257,7 @@ init([]) ->
 		case catch config_scan(NodeGrps, publish_type) of
 		    {error, _Error2} ->
 			update_publish_nodes(PT),
-			exit({error, {'invalid global_groups definition', NodeGrps}});
+			exit({error, {'invalid s_groups definition', NodeGrps}});
 		    {DefGroupNameT, PubType, DefNodesT, DefOtherT} ->
 			update_publish_nodes(PT, {PubType, DefNodesT}),
 			%% First disconnect any nodes not belonging to our own group
@@ -281,11 +280,11 @@ init([]) ->
 %%%
 %%% An operator ordered sync of the own global group. This must be done after
 %%% a release upgrade. It can also be ordered if somthing has made the nodes
-%%% to disagree of the global_groups definition.
+%%% to disagree of the s_groups definition.
 %%%====================================================================================
 handle_call(sync, _From, S) ->
-%    io:format("~p sync ~p~n",[node(), application:get_env(kernel, global_groups)]),
-    case application:get_env(kernel, global_groups) of
+%    io:format("~p sync ~p~n",[node(), application:get_env(kernel, s_groups)]),
+    case application:get_env(kernel, s_groups) of
 	undefined ->
 	    update_publish_nodes(S#state.publish_type),
 	    {reply, ok, S};
@@ -296,16 +295,16 @@ handle_call(sync, _From, S) ->
 	    {DefGroupName, PubTpGrp, DefNodes, DefOther} = 
 		case catch config_scan(NodeGrps, publish_type) of
 		    {error, _Error2} ->
-			exit({error, {'invalid global_groups definition', NodeGrps}});
+			exit({error, {'invalid s_groups definition', NodeGrps}});
 		    {DefGroupNameT, PubType, DefNodesT, DefOtherT} ->
 			update_publish_nodes(S#state.publish_type, {PubType, DefNodesT}),
 			%% First inform global on all nodes not belonging to our own group
 			disconnect_nodes(nodes(connected) -- DefNodesT),
 			%% Sync with the nodes in the own group
-			kill_global_group_check(),
+			kill_s_group_check(),
 			Pid = spawn_link(?MODULE, sync_init, 
 					 [sync, DefGroupNameT, PubType, DefNodesT]),
-			register(global_group_check, Pid),
+			register(s_group_check, Pid),
 			{DefGroupNameT, PubType, lists:delete(node(), DefNodesT), DefOtherT}
 		end,
 	    {reply, ok, S#state{sync_state = synced, group_name = DefGroupName, 
@@ -316,11 +315,9 @@ handle_call(sync, _From, S) ->
 
 
 %%%====================================================================================
-%%% global_groups() -> {OwnGroupName, [OtherGroupName]} | undefined
-%%%
-%%% Get the names of the global groups
+%%% Get the names of the s_groups
 %%%====================================================================================
-handle_call(global_groups, _From, S) ->
+handle_call(s_groups, _From, S) ->
     Result = case S#state.sync_state of
 		 no_conf ->
 		     undefined;
@@ -498,15 +495,15 @@ handle_call({whereis_name, {node, Node}, Name}, From, S) ->
 
 
 %%%====================================================================================
-%%% global_groups parameter changed
+%%% s_groups parameter changed
 %%% The node is not resynced automatically because it would cause this node to
 %%% be disconnected from those nodes not yet been upgraded.
 %%%====================================================================================
-handle_call({global_groups_changed, NewPara}, _From, S) ->
+handle_call({s_groups_changed, NewPara}, _From, S) ->
     {NewGroupName, PubTpGrp, NewNodes, NewOther} = 
 	case catch config_scan(NewPara, publish_type) of
 	    {error, _Error2} ->
-		exit({error, {'invalid global_groups definition', NewPara}});
+		exit({error, {'invalid s_groups definition', NewPara}});
 	    {DefGroupName, PubType, DefNodes, DefOther} ->
 		update_publish_nodes(S#state.publish_type, {PubType, DefNodes}),
 		{DefGroupName, PubType, DefNodes, DefOther}
@@ -539,16 +536,16 @@ handle_call({global_groups_changed, NewPara}, _From, S) ->
 
 
 %%%====================================================================================
-%%% global_groups parameter added
+%%% s_groups parameter added
 %%% The node is not resynced automatically because it would cause this node to
 %%% be disconnected from those nodes not yet been upgraded.
 %%%====================================================================================
-handle_call({global_groups_added, NewPara}, _From, S) ->
-%    io:format("### global_groups_changed, NewPara ~p ~n",[NewPara]),
+handle_call({s_groups_added, NewPara}, _From, S) ->
+%    io:format("### s_groups_changed, NewPara ~p ~n",[NewPara]),
     {NewGroupName, PubTpGrp, NewNodes, NewOther} = 
 	case catch config_scan(NewPara, publish_type) of
 	    {error, _Error2} ->
-		exit({error, {'invalid global_groups definition', NewPara}});
+		exit({error, {'invalid s_groups definition', NewPara}});
 	    {DefGroupName, PubType, DefNodes, DefOther} ->
 		update_publish_nodes(S#state.publish_type, {PubType, DefNodes}),
 		{DefGroupName, PubType, DefNodes, DefOther}
@@ -584,10 +581,10 @@ handle_call({global_groups_added, NewPara}, _From, S) ->
 
 
 %%%====================================================================================
-%%% global_groups parameter removed
+%%% s_groups parameter removed
 %%%====================================================================================
-handle_call({global_groups_removed, _NewPara}, _From, S) ->
-%    io:format("### global_groups_removed, NewPara ~p ~n",[_NewPara]),
+handle_call({s_groups_removed, _NewPara}, _From, S) ->
+%    io:format("### s_groups_removed, NewPara ~p ~n",[_NewPara]),
     update_publish_nodes(S#state.publish_type),
     NewS = S#state{sync_state = no_conf, group_name = [], nodes = [], 
 		   sync_error = [], no_contact = [], 
@@ -596,7 +593,7 @@ handle_call({global_groups_removed, _NewPara}, _From, S) ->
 
 
 %%%====================================================================================
-%%% global_groups parameter added to some other node which thinks that we
+%%% s_groups parameter added to some other node which thinks that we
 %%% belong to the same global group.
 %%% It could happen that our node is not yet updated with the new node_group parameter
 %%%====================================================================================
@@ -760,7 +757,7 @@ handle_cast({find_name_res, Result, Pid, From}, S) ->
 %%%====================================================================================
 handle_cast({synced, NoContact}, S) ->
 %    io:format("~p>>>>> synced ~p  ~n",[node(), NoContact]),
-    kill_global_group_check(),
+    kill_s_group_check(),
     Nodes = get_own_nodes() -- [node() | NoContact],
     {noreply, S#state{nodes = lists:sort(Nodes),
 		      sync_error = [],
@@ -773,9 +770,9 @@ handle_cast({synced, NoContact}, S) ->
 handle_cast({sync_error, NoContact, ErrorNodes}, S) ->
 %    io:format("~p>>>>> sync_error ~p ~p ~n",[node(), NoContact, ErrorNodes]),
     Txt = io_lib:format("Global group: Could not synchronize with these nodes ~p~n"
-			"because global_groups were not in agreement. ~n", [ErrorNodes]),
+			"because s_groups were not in agreement. ~n", [ErrorNodes]),
     error_logger:error_report(Txt),
-    kill_global_group_check(),
+    kill_s_group_check(),
     Nodes = (get_own_nodes() -- [node() | NoContact]) -- ErrorNodes,
     {noreply, S#state{nodes = lists:sort(Nodes), 
 		      sync_error = ErrorNodes,
@@ -792,37 +789,37 @@ handle_cast({conf_check, Vsn, Node, From, sync, CCName, PubType, CCNodes}, S) ->
     CurNodes = S#state.nodes,
 %    io:format(">>>>> conf_check,sync  Node ~p~n",[Node]),
     %% Another node is syncing, 
-    %% done for instance after upgrade of global_groups parameter
+    %% done for instance after upgrade of s_groups parameter
     NS = 
-	case application:get_env(kernel, global_groups) of
+	case application:get_env(kernel, s_groups) of
 	    undefined ->
 		%% We didn't have any node_group definition
 		update_publish_nodes(S#state.publish_type),
 		disconnect_nodes([Node]),
-		{global_group_check, Node} ! {config_error, Vsn, From, node()},
+		{s_group_check, Node} ! {config_error, Vsn, From, node()},
 		S;
 	    {ok, []} ->
 		%% Our node_group definition was empty
 		update_publish_nodes(S#state.publish_type),
 		disconnect_nodes([Node]),
-		{global_group_check, Node} ! {config_error, Vsn, From, node()},
+		{s_group_check, Node} ! {config_error, Vsn, From, node()},
 		S;
 	    %%---------------------------------
-	    %% global_groups defined
+	    %% s_groups defined
 	    %%---------------------------------
 	    {ok, NodeGrps} ->
 		case catch config_scan(NodeGrps, publish_type) of
 		    {error, _Error2} ->
 			%% Our node_group definition was erroneous
 			disconnect_nodes([Node]),
-			{global_group_check, Node} ! {config_error, Vsn, From, node()},
+			{s_group_check, Node} ! {config_error, Vsn, From, node()},
 			S#state{nodes = lists:delete(Node, CurNodes)};
 
 		    {CCName, PubType, CCNodes, _OtherDef} ->
 			%% OK, add the node to the #state.nodes if it isn't there
 			update_publish_nodes(S#state.publish_type, {PubType, CCNodes}),
 			global_name_server ! {nodeup, Node},
-			{global_group_check, Node} ! {config_ok, Vsn, From, node()},
+			{s_group_check, Node} ! {config_ok, Vsn, From, node()},
 			case lists:member(Node, CurNodes) of
 			    false ->
 				NewNodes = lists:sort([Node | CurNodes]),
@@ -837,7 +834,7 @@ handle_cast({conf_check, Vsn, Node, From, sync, CCName, PubType, CCNodes}, S) ->
 		    _ ->
 			%% node_group definitions were not in agreement
 			disconnect_nodes([Node]),
-			{global_group_check, Node} ! {config_error, Vsn, From, node()},
+			{s_group_check, Node} ! {config_error, Vsn, From, node()},
 			NN = lists:delete(Node, S#state.nodes),
 			NSE = lists:delete(Node, S#state.sync_error),
 			NNC = lists:delete(Node, S#state.no_contact),
@@ -912,7 +909,7 @@ handle_info({nodeup, Node}, S) ->
 %%%====================================================================================
 %%% A node has crashed. 
 %%% nodedown must always be sent to global; this is a security measurement
-%%% because during release upgrade the global_groups parameter is upgraded
+%%% because during release upgrade the s_groups parameter is upgraded
 %%% before the node is synced. This means that nodedown may arrive from a
 %%% node which we are not aware of.
 %%%====================================================================================
@@ -938,7 +935,7 @@ handle_info({nodedown, Node}, S) ->
 
 
 %%%====================================================================================
-%%% A node has changed its global_groups definition, and is telling us that we are not
+%%% A node has changed its s_groups definition, and is telling us that we are not
 %%% included in his group any more. This could happen at release upgrade.
 %%%====================================================================================
 handle_info({disconnect_node, Node}, S) ->
@@ -1084,8 +1081,8 @@ sync_check_init(Type, Up, Cname, Nodes, N, ErrorNodes, Down, PubType) ->
 	{error, NewErrorNodes} ->
 	    sync_check_init(Type, [], Cname, Nodes, 0, ErrorNodes ++ NewErrorNodes, Down, PubType);
 	{more, Rem, NewErrorNodes} ->
-	    %% Try again to reach the global_group, 
-	    %% obviously the node is up but not the global_group process.
+	    %% Try again to reach the s_group, 
+	    %% obviously the node is up but not the s_group process.
 	    sync_check_init(Type, Rem, Cname, Nodes, N-1, ErrorNodes ++ NewErrorNodes, Down, PubType)
     end.
 
@@ -1103,7 +1100,7 @@ sync_check(Rem, Up, ErrorNodes) ->
 	    sync_check(Rem -- [Node], Up, ErrorNodes);
 	{config_error, ?cc_vsn, Pid, Node} when Pid =:= self() ->
 	    sync_check(Rem -- [Node], Up, [Node | ErrorNodes]);
-	{no_global_group_configuration, ?cc_vsn, Pid, Node} when Pid =:= self() ->
+	{no_s_group_configuration, ?cc_vsn, Pid, Node} when Pid =:= self() ->
 	    sync_check(Rem -- [Node], Up, [Node | ErrorNodes]);
 	%% Ignore, illegal vsn or illegal Pid
 	_ ->
@@ -1239,21 +1236,21 @@ check_exit_where(Where, ExitPid, Reason) ->
 
 
 %%%====================================================================================
-%%% Kill any possible global_group_check processes
+%%% Kill any possible s_group_check processes
 %%%====================================================================================
-kill_global_group_check() ->
-    case whereis(global_group_check) of
+kill_s_group_check() ->
+    case whereis(s_group_check) of
 	undefined ->
 	    ok;
 	Pid ->
 	    unlink(Pid),
-	    global_group_check ! kill,
-	    unregister(global_group_check)
+	    s_group_check ! kill,
+	    unregister(s_group_check)
     end.
 
 
 %%%====================================================================================
-%%% Disconnect nodes not belonging to own global_groups
+%%% Disconnect nodes not belonging to own s_groups
 %%%====================================================================================
 disconnect_nodes(DisconnectNodes) ->
     lists:foreach(fun(Node) ->
@@ -1264,7 +1261,7 @@ disconnect_nodes(DisconnectNodes) ->
 
 
 %%%====================================================================================
-%%% Disconnect nodes not belonging to own global_groups
+%%% Disconnect nodes not belonging to own s_groups
 %%%====================================================================================
 force_nodedown(DisconnectNodes) ->
     lists:foreach(fun(Node) ->
@@ -1275,10 +1272,10 @@ force_nodedown(DisconnectNodes) ->
 
 
 %%%====================================================================================
-%%% Get the current global_groups definition
+%%% Get the current s_groups definition
 %%%====================================================================================
 get_own_nodes_with_errors() ->
-    case application:get_env(kernel, global_groups) of
+    case application:get_env(kernel, s_groups) of
 	undefined ->
 	    {ok, all};
 	{ok, []} ->
@@ -1320,7 +1317,7 @@ publish_arg() ->
 %%% Own group publication type and nodes
 %%%====================================================================================
 own_group() ->
-    case application:get_env(kernel, global_groups) of
+    case application:get_env(kernel, s_groups) of
 	undefined ->
 	    no_group;
 	{ok, []} ->
