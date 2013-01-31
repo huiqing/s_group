@@ -197,11 +197,11 @@ request(Req) ->
     request(Req, infinity).
 
 request(Req, Time) ->
-    case whereis(global_group) of
+    case whereis(s_group) of
 	P when is_pid(P) ->
-	    gen_server:call(global_group, Req, Time);
+	    gen_server:call(s_group, Req, Time);
 	_Other -> 
-	    {error, global_group_not_runnig}
+	    {error, s_group_not_runnig}
     end.
 
 %%%====================================================================================
@@ -226,8 +226,8 @@ request(Req, Time) ->
 %%% are used to store information needed if the search process crashes. 
 %%% The search process is a help process to find registered names in the system.
 %%%====================================================================================
-start() -> gen_server:start({local, global_group}, s_group, [], []).
-start_link() -> gen_server:start_link({local, global_group},s_group,[],[]).
+start() -> gen_server:start({local, s_group}, s_group, [], []).
+start_link() -> gen_server:start_link({local, s_group},s_group,[],[]).
 stop() -> gen_server:call(s_group, stop, infinity).
 
 init([]) ->
@@ -1056,9 +1056,9 @@ sync_check_init(Type, Up, Cname, Nodes, Down, PubType) ->
 sync_check_init(_Type, NoContact, _Cname, _Nodes, 0, ErrorNodes, Down, _PubType) ->
     case ErrorNodes of
 	[] -> 
-	    gen_server:cast(global_group, {synced, lists:sort(NoContact ++ Down)});
+	    gen_server:cast(s_group, {synced, lists:sort(NoContact ++ Down)});
 	_ ->
-	    gen_server:cast(global_group, {sync_error, lists:sort(NoContact ++ Down),
+	    gen_server:cast(s_group, {sync_error, lists:sort(NoContact ++ Down),
 					   ErrorNodes})
     end,
     receive
@@ -1076,7 +1076,7 @@ sync_check_init(Type, Up, Cname, Nodes, N, ErrorNodes, Down, PubType) ->
 			   {conf_check, ?cc_vsn, node(), self(), Type, Cname, PubType, Nodes}
 		   end,
     lists:foreach(fun(Node) -> 
-			  gen_server:cast({global_group, Node}, ConfCheckMsg)
+			  gen_server:cast({s_group, Node}, ConfCheckMsg)
 		  end, Up),
     case sync_check(Up) of
 	{ok, synced} ->
@@ -1257,7 +1257,7 @@ kill_global_group_check() ->
 %%%====================================================================================
 disconnect_nodes(DisconnectNodes) ->
     lists:foreach(fun(Node) ->
-			  {global_group, Node} ! {disconnect_node, node()},
+			  {s, Node} ! {disconnect_node, node()},
 			  global:node_disconnected(Node)
 		  end,
 		  DisconnectNodes).

@@ -119,8 +119,8 @@ init([]) ->
 		   permanent, 2000, worker, [rpc]},
 	    Global = {global_name_server, {global, start_link, []}, 
 		      permanent, 2000, worker, [global]},
-	    Glo_grp = {global_group, {s_group,start_link,[]},
-		       permanent, 2000, worker, [s_group]},
+	    SGrp = {s_group, {s_group,start_link,[]},
+		    permanent, 2000, worker, [s_group]},
 	    InetDb = {inet_db, {inet_db, start_link, []},
 		      permanent, 2000, worker, [inet_db]},
 	    NetSup = {net_sup, {erl_distribution, start_link, []}, 
@@ -135,7 +135,7 @@ init([]) ->
 			      permanent, infinity, supervisor, [?MODULE]},
 	    {ok, {SupFlags,
 		  [Rpc, Global, InetDb | DistAC] ++ 
-		  [NetSup, Glo_grp, File, Code, 
+		  [NetSup, SGrp, File, Code,
 		   StdError, User, Config, SafeSupervisor] ++ Timer}}
     end;
 init(safe) ->
