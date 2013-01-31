@@ -83,7 +83,7 @@
 
 -record(state, {sync_state = no_conf        :: sync_state(),
 		connect_all                 :: boolean(),
-		group_name = []             :: [group_name()],  %% type changed by HL;
+		group_names = []            :: [group_name()],  %% type changed by HL;
 		nodes = []                  :: [node()],
 		no_contact = []             :: [node()],
 		sync_error = []             :: [node()],
@@ -172,7 +172,7 @@ ng_add_check(Node, PubType, OthersNG) ->
     request({ng_add_check, Node, PubType, OthersNG}).
 
 -type info_item() :: {'state', State :: sync_state()}
-                   | {'own_group_name', GroupName :: [group_name()]}
+                   | {'own_group_names', GroupName :: [group_name()]}
                    | {'own_group_nodes', Nodes :: [node()]}
                    | {'synched_nodes', Nodes :: [node()]}
                    | {'sync_error', Nodes :: [node()]}
@@ -278,7 +278,7 @@ init([]) ->
                                   end,
                                   DefSGroupNodesT),
                     NewState = #state{publish_type = PT, group_publish_type = normal,
-                                      sync_state = synced, group_name = DefSGroupNamesT,
+                                      sync_state = synced, group_names = DefSGroupNamesT,
                                       no_contact = lists:delete(node(), DefSGroupNodesT),
                                       own_grps = DefOwnSGroupsT1,
                                       other_grps = DefOtherSGroupsT},
@@ -320,7 +320,7 @@ handle_call(sync, _From, S) ->
 			register(s_group_check, Pid),
 			{DefGroupNameT, PubType, lists:delete(node(), DefNodesT), DefOtherT}
 		end,
-	    {reply, ok, S#state{sync_state = synced, group_name = [DefGroupName], 
+	    {reply, ok, S#state{sync_state = synced, group_names = [DefGroupName], 
 				no_contact = lists:sort(DefNodes), 
 				other_grps = DefOther, group_publish_type = PubTpGrp}}
     end;
@@ -338,7 +338,7 @@ handle_call(s_groups, _From, S) ->
 		     Other = lists:foldl(fun({N,_L}, Acc) -> Acc ++ [N]
 					 end,
 					 [], S#state.other_grps),
-		     {S#state.group_name, Other}
+		     {S#state.group_names, Other}
 	     end,
     {reply, Result, S};
 
@@ -381,7 +381,7 @@ handle_call(own_nodes, _From, S) ->
 %%% Get the registered names from a specified Node, or GlobalGroupName.
 %%%====================================================================================
 handle_call({registered_names, {group, Group}}, From, S) ->
-    case lists:member(Group, S#state.group_name) of 
+    case lists:member(Group, S#state.group_names) of 
       true ->
           Res = global:registered_names(),
           {reply, Res, S};
@@ -434,7 +434,7 @@ handle_call({send, Name, Msg}, From, S) ->
     end;
 %% Search in the specified global group, which happens to be the own group.
 handle_call({send, {group, Grp}, Name, Msg}, From, S) ->
-    case lists:member(Grp, S#state.group_name) of
+    case lists:member(Grp, S#state.group_names) of
         true ->
             case global:whereis_name(Name) of
                 undefined ->
@@ -489,7 +489,7 @@ handle_call({whereis_name, Name}, From, S) ->
 %% Search in the specified global group, which happens to be the own group.
 % Need to change!! HL.
 handle_call({whereis_name, {group, Group}, Name}, From, S) ->
-    case lists:member(Group, S#state.group_name) of
+    case lists:member(Group, S#state.group_names) of
         true ->
             Res = global:whereis_name(Name),
             {reply, Res, S};
@@ -547,7 +547,7 @@ handle_call({s_groups_changed, NewPara}, _From, S) ->
     %% will not be in any global group at all.
     force_nodedown(nodes(connected) -- NewNodes),
 
-    NewS = S#state{group_name = [NewGroupName], 
+    NewS = S#state{group_names = [NewGroupName], 
 		   nodes = lists:sort(NN), 
 		   no_contact = lists:sort(lists:delete(node(), NNC)), 
 		   sync_error = lists:sort(NSE), 
@@ -596,7 +596,7 @@ handle_call({s_groups_added, NewPara}, _From, S) ->
 			    end
 		    end,
 		    {[], [], []}, lists:delete(node(), NewNodes)),
-    NewS = S#state{sync_state = synced, group_name = [NewGroupName], nodes = lists:sort(NN), 
+    NewS = S#state{sync_state = synced, group_names = [NewGroupName], nodes = lists:sort(NN), 
 		   sync_error = lists:sort(NSE), no_contact = lists:sort(NNC), 
 		   other_grps = NewOther, group_publish_type = PubTpGrp},
     {reply, ok, NewS};
@@ -608,7 +608,7 @@ handle_call({s_groups_added, NewPara}, _From, S) ->
 handle_call({s_groups_removed, _NewPara}, _From, S) ->
 %    io:format("### s_groups_removed, NewPara ~p ~n",[_NewPara]),
     update_publish_nodes(S#state.publish_type),
-    NewS = S#state{sync_state = no_conf, group_name = [], nodes = [], 
+    NewS = S#state{sync_state = no_conf, group_names = [], nodes = [], 
 		   sync_error = [], no_contact = [], 
 		   other_grps = []},
     {reply, ok, NewS};
@@ -647,7 +647,7 @@ handle_call({ng_add_check, Node, PubType, OthersNG}, _From, S) ->
 %%%====================================================================================
 handle_call(info, _From, S) ->    
     Reply = [{state,          S#state.sync_state},
-	     {own_group_name, S#state.group_name},
+	     {own_group_names, S#state.group_names},
 	     {own_group_nodes, get_own_nodes()},
 %	     {"nodes()",      lists:sort(nodes())},
 	     {synced_nodes,   S#state.nodes},
