@@ -81,27 +81,14 @@
 %%% monitor =     List of Pids requesting nodeup/nodedown
 %%%====================================================================================
 
-%% -record(state, {sync_state = no_conf        :: sync_state(),
-%% 		connect_all                 :: boolean(),
-%% 		group_name = []             :: group_name() | [],
-%% 		nodes = []                  :: [node()],
-%% 		no_contact = []             :: [node()],
-%% 		sync_error = [],
-%% 		other_grps = [], 
-%% 		node_name = node()          :: node(),
-%% 		monitor = [],
-%% 		publish_type = normal       :: publish_type(),
-%% 		group_publish_type = normal :: publish_type()}).
-
-
 -record(state, {sync_state = no_conf        :: sync_state(),
 		connect_all                 :: boolean(),
-		group_name = []             :: [group_name()],
+		group_name = []             :: [group_name()],  %% type changed by HL;
 		nodes = []                  :: [node()],
 		no_contact = []             :: [node()],
 		sync_error = []             :: [node()],
 		other_grps = []             :: [{group_name(), [node()]}],
-                own_grps =[]                :: [{group_name(), [node()]}],
+                own_grps =[]                :: [{group_name(), [node()]}], %% added by HL;
 		node_name = node()          :: node(),
 		monitor = []                :: [pid()],
 		publish_type = normal       :: publish_type(),
@@ -190,6 +177,7 @@ ng_add_check(Node, PubType, OthersNG) ->
                    | {'synched_nodes', Nodes :: [node()]}
                    | {'sync_error', Nodes :: [node()]}
                    | {'no_contact', Nodes :: [node()]}
+                   | {'own_groups', OwnGroups::[group_tuple()]}
                    | {'other_groups', Groups :: [group_tuple()]}
                    | {'monitoring', Pids :: [pid()]}.
 
@@ -268,26 +256,36 @@ init([]) ->
 	    {ok, #state{publish_type = PT,
 			connect_all = Ca}};
 	{ok, NodeGrps} ->
-	    {DefGroupName, PubTpGrp, DefNodes, DefOther} = 
-		case catch config_scan(NodeGrps, publish_type) of
-		    {error, _Error2} ->
-			update_publish_nodes(PT),
-			exit({error, {'invalid s_groups definition', NodeGrps}});
-		    {DefGroupNameT, PubType, DefNodesT, DefOtherT} ->
-			update_publish_nodes(PT, {PubType, DefNodesT}),
-			%% First disconnect any nodes not belonging to our own group
-			disconnect_nodes(nodes(connected) -- DefNodesT),
-			lists:foreach(fun(Node) ->
-					      erlang:monitor_node(Node, true)
-				      end,
-				      DefNodesT),
-			{DefGroupNameT, PubType, lists:delete(node(), DefNodesT), DefOtherT}
-		end,
-	    {ok, #state{publish_type = PT, group_publish_type = PubTpGrp,
-			sync_state = synced, group_name = [DefGroupName], 
-			no_contact = lists:sort(DefNodes), 
-			other_grps = DefOther}}
+            case catch config_scan(NodeGrps, publish_type) of
+                {error, _Error2} ->
+                    update_publish_nodes(PT),
+                    exit({error, {'invalid g_groups definition', NodeGrps}});
+                {ok, DefOwnSGroupsT, DefOtherSGroupsT} ->
+                    erlang:display({"Scan result:",  {ok, DefOwnSGroupsT, DefOtherSGroupsT}}),
+                    DefOwnSGroupsT1 = [{GroupName,GroupNodes}||
+                                          {GroupName, _PubType, GroupNodes}
+                                              <- DefOwnSGroupsT],
+                    {DefSGroupNamesT1, DefSGroupNodesT1}=lists:unzip(DefOwnSGroupsT1),
+                    DefSGroupNamesT = lists:usort(DefSGroupNamesT1),
+                    DefSGroupNodesT = lists:usort(lists:append(DefSGroupNodesT1)),
+                    update_publish_nodes(PT, {normal, DefSGroupNodesT}),
+                    %% First disconnect any nodes not belonging to our own group
+                    erlang:display({"Nodes to disconnect", [nodes(connected) -- DefSGroupNodesT]}),
+                    disconnect_nodes(nodes(connected) -- DefSGroupNodesT),
+                    erlang:display({"DefsGroupNodesT:", DefSGroupNodesT}),
+                    lists:foreach(fun(Node) ->
+                                          erlang:monitor_node(Node, true)
+                                  end,
+                                  DefSGroupNodesT),
+                    NewState = #state{publish_type = PT, group_publish_type = normal,
+                                      sync_state = synced, group_name = DefSGroupNamesT,
+                                      no_contact = lists:delete(node(), DefSGroupNodesT),
+                                      own_grps = DefOwnSGroupsT1,
+                                      other_grps = DefOtherSGroupsT},
+                    {ok, NewState}
+            end
     end.
+                        
 
 
 %%%====================================================================================
@@ -522,6 +520,7 @@ handle_call({whereis_name, {node, Node}, Name}, From, S) ->
 %%% be disconnected from those nodes not yet been upgraded.
 %%%====================================================================================
 handle_call({s_groups_changed, NewPara}, _From, S) ->
+    %% Need to be changed because of the change of config_scan!! HL
     {NewGroupName, PubTpGrp, NewNodes, NewOther} = 
 	case catch config_scan(NewPara, publish_type) of
 	    {error, _Error2} ->
@@ -564,6 +563,7 @@ handle_call({s_groups_changed, NewPara}, _From, S) ->
 %%%====================================================================================
 handle_call({s_groups_added, NewPara}, _From, S) ->
 %    io:format("### s_groups_changed, NewPara ~p ~n",[NewPara]),
+    %% Need to be changed because of the change of config_scan!! HL
     {NewGroupName, PubTpGrp, NewNodes, NewOther} = 
 	case catch config_scan(NewPara, publish_type) of
 	    {error, _Error2} ->
@@ -653,6 +653,7 @@ handle_call(info, _From, S) ->
 	     {synced_nodes,   S#state.nodes},
 	     {sync_error,     S#state.sync_error},
 	     {no_contact,     S#state.no_contact},
+             {own_groups,     S#state.own_grps},
 	     {other_groups,   S#state.other_grps},
 	     {monitoring,     S#state.monitor}],
 
@@ -830,6 +831,7 @@ handle_cast({conf_check, Vsn, Node, From, sync, CCName, PubType, CCNodes}, S) ->
 	    %% s_groups defined
 	    %%---------------------------------
 	    {ok, NodeGrps} ->
+                %% Need to be changed because of the change of config_scan!! HL
 		case catch config_scan(NodeGrps, publish_type) of
 		    {error, _Error2} ->
 			%% Our node_group definition was erroneous
@@ -1004,34 +1006,37 @@ code_change(_OldVsn, State, _Extra) ->
 %%% Check the global group configuration.
 %%%====================================================================================
 
+%% type spec added by HL.
+-spec config_scan(NodeGrps::[group_tuple()])->
+                         {ok, OwnGrps::[{group_name(), [node()]}], 
+                          OtherGrps::[{group_name(), [node()]}]}
+                             |{error, any()}.
+
+%% Functionality rewritten by HL.
 config_scan(NodeGrps) ->
     config_scan(NodeGrps, original).
 
 config_scan(NodeGrps, original) ->
-    case config_scan(NodeGrps, publish_type) of
-	{DefGroupName, _, DefNodes, DefOther} ->
-	    {DefGroupName, DefNodes, DefOther};
-	Error ->
-	    Error
-    end;
-config_scan(NodeGrps, publish_type) ->
-    config_scan(node(), normal, NodeGrps, no_name, [], []).
+     config_scan(NodeGrps, publish_type);
 
-config_scan(_MyNode, PubType, [], Own_name, OwnNodes, OtherNodeGrps) ->
-    {Own_name, PubType, lists:sort(OwnNodes), lists:reverse(OtherNodeGrps)};
-config_scan(MyNode, PubType, [GrpTuple|NodeGrps], Own_name, OwnNodes, OtherNodeGrps) ->
-    {Name, PubTypeGroup, Nodes} = grp_tuple(GrpTuple),
+config_scan(NodeGrps, publish_type) ->
+    config_scan(node(), NodeGrps, [], []).
+
+config_scan(_MyNode, [], MyOwnNodeGrps, OtherNodeGrps) ->
+    {ok, MyOwnNodeGrps, OtherNodeGrps};
+config_scan(MyNode, [GrpTuple|NodeGrps], MyOwnNodeGrps, OtherNodeGrps) ->
+    {GrpName, PubTypeGroup, Nodes} = grp_tuple(GrpTuple),
     case lists:member(MyNode, Nodes) of
 	true ->
-	    case Own_name of
-		no_name ->
-		    config_scan(MyNode, PubTypeGroup, NodeGrps, Name, Nodes, OtherNodeGrps);
-		_ ->
-		    {error, {'node defined twice', {Own_name, Name}}}
-	    end;
+            %% HL: is PubTypeGroup needed?
+            config_scan(MyNode, NodeGrps, 
+                        [{GrpName, PubTypeGroup,lists:sort(Nodes)}
+                         |MyOwnNodeGrps], 
+                        OtherNodeGrps);
 	false ->
-	    config_scan(MyNode,PubType,NodeGrps,Own_name,OwnNodes,
-			[{Name, Nodes}|OtherNodeGrps])
+	    config_scan(MyNode,NodeGrps, MyOwnNodeGrps,
+                        [{GrpName, lists:sort(Nodes)}|
+                         OtherNodeGrps])
     end.
 
 grp_tuple({Name, Nodes}) ->
@@ -1040,6 +1045,37 @@ grp_tuple({Name, hidden, Nodes}) ->
     {Name, hidden, Nodes};
 grp_tuple({Name, normal, Nodes}) ->
     {Name, normal, Nodes}.
+
+    
+%% config_scan(NodeGrps) ->
+%%     config_scan(NodeGrps, original).
+
+%% config_scan(NodeGrps, original) ->
+%%     case config_scan(NodeGrps, publish_type) of
+%% 	{DefGroupName, _, DefNodes, DefOther} ->
+%% 	    {DefGroupName, DefNodes, DefOther};
+%% 	Error ->
+%% 	    Error
+%%     end;
+%% config_scan(NodeGrps, publish_type) ->
+%%     config_scan(node(), normal, NodeGrps, no_name, [], []).
+
+%% config_scan(_MyNode, PubType, [], Own_name, OwnNodes, OtherNodeGrps) ->
+%%     {Own_name, PubType, lists:sort(OwnNodes), lists:reverse(OtherNodeGrps)};
+%% config_scan(MyNode, PubType, [GrpTuple|NodeGrps], Own_name, OwnNodes, OtherNodeGrps) ->
+%%     {Name, PubTypeGroup, Nodes} = grp_tuple(GrpTuple),
+%%     case lists:member(MyNode, Nodes) of
+%% 	true ->
+%% 	    case Own_name of
+%% 		no_name ->
+%% 		    config_scan(MyNode, PubTypeGroup, NodeGrps, Name, Nodes, OtherNodeGrps);
+%% 		_ ->
+%% 		    {error, {'node defined twice', {Own_name, Name}}}
+%% 	    end;
+%% 	false ->
+%% 	    config_scan(MyNode,PubType,NodeGrps,Own_name,OwnNodes,
+%% 			[{Name, Nodes}|OtherNodeGrps])
+%%     end.
 
     
 %%%====================================================================================
@@ -1303,13 +1339,14 @@ get_own_nodes_with_errors() ->
 	{ok, []} ->
 	    {ok, all};
 	{ok, NodeGrps} ->
-	    case catch config_scan(NodeGrps, publish_type) of
+            case catch config_scan(NodeGrps, publish_type) of
 		{error, Error} ->
 		    {error, Error};
-		{_, _, NodesDef, _} ->
-		    {ok, lists:sort(NodesDef)}
-	    end
-    end.
+                {ok, OwnSGroups, _} ->
+                    Nodes = lists:append([Nodes||{_, _, Nodes}<-OwnSGroups]),
+                    {ok, lists:usort(Nodes)}
+            end
+	    end.
 
 get_own_nodes() ->
     case get_own_nodes_with_errors() of
@@ -1348,11 +1385,12 @@ own_group() ->
 	    case catch config_scan(NodeGrps, publish_type) of
 		{error, _} ->
 		    no_group;
-		{_, PubTpGrp, NodesDef, _} ->
-		    {PubTpGrp, NodesDef}
-	    end
+                {ok, OwnSGroups, _OtherSGroups} ->
+                    NodesDef = lists:append([Nodes||{_, _, Nodes}<-OwnSGroups]),
+                    {normal, NodesDef}
+            end
     end.
-
+ 
 
 %%%====================================================================================
 %%% Help function which computes publication list
