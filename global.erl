@@ -1,4 +1,4 @@
-%%
+
 %% %CopyrightBegin%
 %%
 %% Copyright Ericsson AB 1996-2012. All Rights Reserved.
@@ -43,6 +43,8 @@
 
 -export([info/0]).
 
+-compile(export_all).
+
 -include_lib("stdlib/include/ms_transform.hrl").
 
 %% Set this variable to 'allow' to allow several names of a process.
@@ -60,6 +62,8 @@
 -define(trace(_), ok).
 
 %-define(trace(T), (catch my_tracer ! {node(), {line,?LINE}, T})).
+
+%-define(trace(T), erlang:display({node(), {line,?LINE}, T})).
 
 %-define(trace(T), erlang:display({format, node(), cs(), T})).
 %cs() ->
@@ -80,6 +84,13 @@
 %% Current version of global does not support vsn 4 or earlier.
 
 -define(vsn, 5).
+
+
+-define(debug(_), ok).
+
+%%-define(debug(Term), erlang:display(Term)).
+
+
 
 %%-----------------------------------------------------------------
 %% connect_all = boolean() - true if we are supposed to set up a
@@ -106,10 +117,13 @@
 %% {sync_tag_his, Node} = The Node's tag, used at synchronization
 %% {lock_id, Node} = The resource locking the partitions
 %%-----------------------------------------------------------------
+-type group_name()  :: atom().
+-type group_tuple() :: {GroupName :: group_name(), [node()]}.
+                 
 -record(state, {connect_all        :: boolean(),
-		known = []         :: [node()],
-		synced = []        :: [node()],
-		resolvers = [],
+		known = []         :: [group_tuple()],
+		synced = []        :: [group_tuple()],
+		resolvers = [], 
 		syncers = []       :: [pid()],
 		node_name = node() :: node(),
 		the_locker, the_registrar, trace,
@@ -611,7 +625,8 @@ handle_call({del_lock, Lock}, {Pid, _Tag}, S0) ->
     {reply, true, S};
 
 handle_call(get_known, _From, S) ->
-    {reply, S#state.known, S};
+    Nodes = lists:usort(lists:append(element(2, lists:unzip(S#state.known)))),
+    {reply, Nodes, S};
 
 handle_call(get_synced, _From, S) ->
     {reply, S#state.synced, S};
@@ -724,21 +739,25 @@ handle_cast({exchange, Node, NameList, _NameExtList, MyTag}, S) ->
 %% resolve operations. Otherwise we have to save the operations and
 %% wait for {resolve, ...}. This is very much like {lock_is_set, ...}
 %% and {exchange, ...}.
-handle_cast({exchange_ops, Node, MyTag, Ops, Resolved}, S0) ->
+handle_cast({exchange_ops, Group, Node, MyTag, Ops, Resolved}, S0) ->  %% added Group by HL;
     %% Sent from the resolver for Node at node().
     ?trace({exchange_ops, {node,Node}, {ops,Ops},{resolved,Resolved},
             {mytag,MyTag}}),
     S = trace_message(S0, {exit_resolver, Node}, [MyTag]),
     case get({sync_tag_my, Node}) of
 	MyTag ->
-            Known = S#state.known,
+            %% Known = S#state.known,
+            Known = case lists:keyfind(Group, 1, S#state.known) of 
+                         false -> [];
+                        {Group, Nodes} -> Nodes
+                    end,
 	    gen_server:cast({global_name_server, Node},
-			    {resolved, node(), Resolved, Known,
+			    {resolved, Group, node(), Resolved, Known,
 			     Known,get_names_ext(),get({sync_tag_his,Node})}),
             case get({save_ops, Node}) of
                 {resolved, HisKnown, Names_ext, HisResolved} ->
                     put({save_ops, Node}, Ops),
-                    NewS = resolved(Node, HisResolved, HisKnown, Names_ext,S),
+                    NewS = resolved(Group, Node, HisResolved, HisKnown, Names_ext,S),
                     {noreply, NewS};
                 undefined -> 
                     put({save_ops, Node}, Ops),
@@ -754,7 +773,7 @@ handle_cast({exchange_ops, Node, MyTag, Ops, Resolved}, S0) ->
 %%
 %% Here the name clashes are resolved.
 %%========================================================================
-handle_cast({resolved, Node, HisResolved, HisKnown, _HisKnown_v2, 
+handle_cast({resolved, Group, Node, HisResolved, HisKnown, _HisKnown_v2,  %%added Group by HL;
              Names_ext, MyTag}, S) ->
     %% Sent from global_name_server at Node.
     ?trace({'####', resolved, {his_resolved,HisResolved}, {node,Node}}),
@@ -763,7 +782,7 @@ handle_cast({resolved, Node, HisResolved, HisKnown, _HisKnown_v2,
             %% See the comment at handle_case({exchange_ops, ...}).
             case get({save_ops, Node}) of
                 Ops when is_list(Ops) ->
-                    NewS = resolved(Node, HisResolved, HisKnown, Names_ext, S),
+                    NewS = resolved(Group, Node, HisResolved, HisKnown, Names_ext, S),
                     {noreply, NewS};
                 undefined ->
                     Resolved = {resolved, HisKnown, Names_ext, HisResolved},
@@ -780,10 +799,10 @@ handle_cast({resolved, Node, HisResolved, HisKnown, _HisKnown_v2,
 %%
 %% We get to know the other node's known nodes.
 %%========================================================================
-handle_cast({new_nodes, Node, Ops, Names_ext, Nodes, ExtraInfo}, S) ->
+handle_cast({new_nodes, Group, Node, Ops, Names_ext, Nodes, ExtraInfo}, S) ->
     %% Sent from global_name_server at Node.
     ?trace({new_nodes, {node,Node},{ops,Ops},{nodes,Nodes},{x,ExtraInfo}}),
-    NewS = new_nodes(Ops, Node, Names_ext, Nodes, ExtraInfo, S),
+    NewS = new_nodes(Ops, Group, Node, Names_ext, Nodes, ExtraInfo, S),
     {noreply, NewS};
 
 %%========================================================================
@@ -791,16 +810,19 @@ handle_cast({new_nodes, Node, Ops, Names_ext, Nodes, ExtraInfo}, S) ->
 %%
 %% We are in sync with this node (from the other node's known world).
 %%========================================================================
-handle_cast({in_sync, Node, _IsKnown}, S) ->
+handle_cast({in_sync, Group, Node, _IsKnown}, S) ->
     %% Sent from global_name_server at Node (in the other partition).
     ?trace({'####', in_sync, {Node, _IsKnown}}),
     lists:foreach(fun(Pid) -> Pid ! {synced, [Node]} end, S#state.syncers),
     NewS = cancel_locker(Node, S, get({sync_tag_my, Node})),
     reset_node_state(Node),
-    NSynced = case lists:member(Node, Synced = NewS#state.synced) of
-		  true -> Synced;
-		  false -> [Node | Synced]
-	      end,
+    Synced = NewS#state.synced,
+    NSynced =  case lists:keyfind(Group, 1, Synced) of 
+                   false -> 
+                       [{Group, [Node]}|Synced];
+                   {Group, Ss}->
+                       lists:keyreplace(Group,1, Synced,{Group, [Node|Ss]})
+               end,
     {noreply, NewS#state{synced = NSynced}};
 
 %% Called when Pid on other node crashed
@@ -864,45 +886,24 @@ handle_info({nodeup, Node}, S) when Node =:= node() ->
     %% references to old node name ('nonode@nohost') to Node.
     {noreply, change_our_node_name(Node, S)};
 
+handle_info({nodeup, _Group, Node}, S) when Node =:= node() ->
+    ?trace({'####', local_nodeup, {node, Node}}),
+    %% Somebody started the distribution dynamically - change
+    %% references to old node name ('nonode@nohost') to Node.
+    {noreply, change_our_node_name(Node, S)};
+
 handle_info({nodeup, _Node}, S) when not S#state.connect_all ->
     {noreply, S};
 
+handle_info({nodeup, _Group, _Node}, S) when not S#state.connect_all ->
+    {noreply, S};
+
 handle_info({nodeup, Node}, S0) when S0#state.connect_all ->
-    IsKnown = lists:member(Node, S0#state.known) or
-              %% This one is only for double nodeups (shouldn't occur!)
-              lists:keymember(Node, 1, S0#state.resolvers),
-    ?trace({'####', nodeup, {node,Node}, {isknown,IsKnown}}),
-    S1 = trace_message(S0, {nodeup, Node}, []),
-    case IsKnown of
-	true ->
-	    {noreply, S1};
-	false ->
-	    resend_pre_connect(Node),
-
-	    %% now() is used as a tag to separate different synch sessions
-	    %% from each others. Global could be confused at bursty nodeups
-	    %% because it couldn't separate the messages between the different
-	    %% synch sessions started by a nodeup.
-	    MyTag = now(),
-	    put({sync_tag_my, Node}, MyTag),
-            ?trace({sending_nodeup_to_locker, {node,Node},{mytag,MyTag}}),
-	    S1#state.the_locker ! {nodeup, Node, MyTag},
-
-            %% In order to be compatible with unpatched R7 a locker
-            %% process was spawned. Vsn 5 is no longer compatible with
-            %% vsn 3 nodes, so the locker process is no longer needed.
-            %% The permanent locker takes its place.
-            NotAPid = no_longer_a_pid,
-            Locker = {locker, NotAPid, S1#state.known, S1#state.the_locker},
-	    InitC = {init_connect, {?vsn, MyTag}, node(), Locker},
-	    Rs = S1#state.resolvers,
-            ?trace({casting_init_connect, {node,Node},{initmessage,InitC},
-                    {resolvers,Rs}}),
-	    gen_server:cast({global_name_server, Node}, InitC),
-            Resolver = start_resolver(Node, MyTag),
-            S = trace_message(S1, {new_resolver, Node}, [MyTag, Resolver]),
-	    {noreply, S#state{resolvers = [{Node, MyTag, Resolver} | Rs]}}
-    end;
+    ?debug({nodeup, Node}),
+    handle_node_up(no_group, Node, S0);
+handle_info({nodeup, Group, Node}, S0) when S0#state.connect_all ->
+    ?debug({nodeup, Group, Node}),
+    handle_node_up(Group, Node, S0);
 
 handle_info({whereis, Name, From}, S) ->
     do_whereis(Name, From),
@@ -948,6 +949,48 @@ handle_info(Message, S) ->
                              "received an unexpected message:\n"
                              "handle_info(~p, _)\n", [Message]),
     {noreply, S}.
+
+handle_node_up(Group, Node, S0) ->
+    IsKnown = lists:member(Node, case lists:keyfind(Group, 1, S0#state.known) of 
+                                     false -> [];
+                                     {Group, Ns} -> Ns
+                                 end) or
+    %% This one is only for double nodeups (shouldn't occur!)
+        lists:keymember(Node, 1, S0#state.resolvers),
+    ?debug({'####', nodeup, {node, Group, Node}, {isknown,IsKnown}}),
+    ?trace({'####', nodeup, {node,Node}, {isknown,IsKnown}}),
+    S1 = trace_message(S0, {nodeup, Node}, []),
+    case IsKnown of
+	true ->
+	    {noreply, S1};
+	false ->
+	    resend_pre_connect(Node),
+
+	    %% now() is used as a tag to separate different synch sessions
+	    %% from each others. Global could be confused at bursty nodeups
+	    %% because it couldn't separate the messages between the different
+	    %% synch sessions started by a nodeup.
+	    MyTag = now(),
+	    put({sync_tag_my, Node}, MyTag),
+            ?trace({sending_nodeup_to_locker, {node,Node},{mytag,MyTag}}),
+	    S1#state.the_locker ! {nodeup, Node, MyTag},
+
+            %% In order to be compatible with unpatched R7 a locker
+            %% process was spawned. Vsn 5 is no longer compatible with
+            %% vsn 3 nodes, so the locker process is no longer needed.
+            %% The permanent locker takes its place.
+            NotAPid = no_longer_a_pid,
+            Locker = {locker, NotAPid, S1#state.known, S1#state.the_locker},
+            InitC = {init_connect, {?vsn, MyTag}, node(), Locker},
+            ?debug(IntC),
+	    Rs = S1#state.resolvers,
+            ?trace({casting_init_connect, {node,Node},{initmessage,InitC},
+                    {resolvers,Rs}}),
+	    gen_server:cast({global_name_server, Node}, InitC),
+            Resolver = start_resolver(Group, Node, MyTag),
+            S = trace_message(S1, {new_resolver, Node}, [MyTag, Resolver]),
+	    {noreply, S#state{resolvers = [{Node, MyTag, Resolver} | Rs]}}
+    end.
 
 
 %%========================================================================
@@ -1104,13 +1147,16 @@ exchange(Node, NameList, Resolvers) ->
 	    put({wait_lock, Node}, {exchange, NameList})
     end.
 
-resolved(Node, HisResolved, HisKnown, Names_ext, S0) ->
+resolved(Group, Node, HisResolved, HisKnown, Names_ext, S0) ->  
+    ?debug({resolved,Group, Node, HisResolved, HisKnown, Names_ext, S0}),
     Ops = erase({save_ops, Node}) ++ HisResolved,
     %% Known may have shrunk since the lock was taken (due to nodedowns).
-    Known = S0#state.known,
-    Synced = S0#state.synced,
-    NewNodes = [Node | HisKnown],
-    sync_others(HisKnown),
+    Known = case lists:keyfind(Group, 1, S0#state.known) of   
+                false -> [];
+                {Group, Ns} -> Ns
+            end,
+    NewNodes = [Node | HisKnown], 
+    sync_others(Group, HisKnown),
     ExtraInfo = [{vsn,get({prot_vsn, Node})}, {lock, get({lock_id, Node})}],
     S = do_ops(Ops, node(), Names_ext, ExtraInfo, S0),
     %% I am synced with Node, but not with HisKnown yet
@@ -1119,24 +1165,40 @@ resolved(Node, HisResolved, HisKnown, Names_ext, S0) ->
                              F = fun(Tag) -> cancel_locker(Node1,S1,Tag) end,
                              cancel_resolved_locker(Node1, F)
                      end, S, HisKnown),
+    ?debug({"S3:", S3}),
     %% The locker that took the lock is asked to send 
     %% the {new_nodes, ...} message. This ensures that
     %% {del_lock, ...} is received after {new_nodes, ...} 
     %% (except when abcast spawns process(es)...).
     NewNodesF = fun() ->
                         gen_server:abcast(Known, global_name_server,
-                                          {new_nodes, node(), Ops, Names_ext,
+                                          {new_nodes, Group, node(), Ops, Names_ext,
                                            NewNodes, ExtraInfo})
                 end,
     F = fun(Tag) -> cancel_locker(Node, S3, Tag, NewNodesF) end,
     S4 = cancel_resolved_locker(Node, F),
     %% See (*) below... we're node b in that description
     AddedNodes = (NewNodes -- Known),
-    NewKnown = Known ++ AddedNodes,
+    NewKnown0 = Known ++ AddedNodes,
     S4#state.the_locker ! {add_to_known, AddedNodes},
     NewS = trace_message(S4, {added, AddedNodes}, 
                          [{new_nodes, NewNodes}, {abcast, Known}, {ops,Ops}]),
-    NewS#state{known = NewKnown, synced = [Node | Synced]}.
+    ?debug({"NewState:", NewS, {added, AddedNodes}, 
+                    [{new_nodes, NewNodes}, {abcast, Known}, {ops,Ops}]}),
+    NewKnown = case lists:keyfind(Group, 1, NewS#state.known) of 
+                   false -> [{Group, NewKnown0}|NewS#state.known];
+                   _ -> lists:keyreplace(Group,1, NewS#state.known, 
+                                         {Group, NewKnown0})
+               end,
+    Synced = NewS#state.synced,
+    NewSynced = case lists:keyfind(Group, 1, Synced) of 
+                    false -> 
+                        [{Group, [Node]}|Synced];
+                    {Group, Ss}->
+                        lists:keyreplace(Group,1, Synced,{Group, [Node|Ss]})
+                end,
+    NewS#state{known = NewKnown, 
+               synced = NewSynced}.
 
 cancel_resolved_locker(Node, CancelFun) ->
     Tag = get({sync_tag_my, Node}),
@@ -1145,7 +1207,7 @@ cancel_resolved_locker(Node, CancelFun) ->
     reset_node_state(Node),
     S.
 
-new_nodes(Ops, ConnNode, Names_ext, Nodes, ExtraInfo, S0) ->
+new_nodes(Ops, Group, ConnNode, Names_ext, Nodes, ExtraInfo, S0) ->
     Known = S0#state.known,
     %% (*) This one requires some thought...
     %% We're node a, other nodes b and c:
@@ -1153,12 +1215,20 @@ new_nodes(Ops, ConnNode, Names_ext, Nodes, ExtraInfo, S0) ->
     %% b from c, leading to b sending {new_nodes, [a]} to us (node a).
     %% Therefore, we make sure we never get duplicates in Known.
     AddedNodes = lists:delete(node(), Nodes -- Known),
-    sync_others(AddedNodes),
+    sync_others(Group, AddedNodes),
     S = do_ops(Ops, ConnNode, Names_ext, ExtraInfo, S0),
     ?trace({added_nodes_in_sync,{added_nodes,AddedNodes}}),
+    ?debug({added_nodes_in_sync,{added_nodes,AddedNodes}}),
     S#state.the_locker ! {add_to_known, AddedNodes},
     S1 = trace_message(S, {added, AddedNodes}, [{ops,Ops}]),
-    S1#state{known = Known ++ AddedNodes}.
+    Known = S1#state.known,
+    NewKnown = case lists:keyfind(Group, 1, Known) of 
+                   false -> [{Group, AddedNodes}|Known];
+                   {Group, Ns}-> 
+                       lists:keyreplace(Group,1, Known, 
+                                        {Group, lists:usort(Ns)++AddedNodes})
+               end,
+    S1#state{known = NewKnown}.
 
 do_whereis(Name, From) ->
     case is_global_lock_set() of
@@ -1186,19 +1256,19 @@ code_change(_OldVsn, S, _Extra) ->
 %% The resolver runs exchange_names in a separate process. The effect
 %% is that locks can be used at the same time as name resolution takes
 %% place.
-start_resolver(Node, MyTag) ->
-    spawn(fun() -> resolver(Node, MyTag) end).
+start_resolver(Group, Node, MyTag) ->
+    spawn(fun() -> resolver(Group, Node, MyTag) end).
 
-resolver(Node, Tag) ->
+resolver(Group, Node, Tag) ->
     receive 
         {resolve, NameList, Node} ->
             ?trace({resolver, {me,self()}, {node,Node}, {namelist,NameList}}),
             {Ops, Resolved} = exchange_names(NameList, Node, [], []),
-            Exchange = {exchange_ops, Node, Tag, Ops, Resolved},
+            Exchange = {exchange_ops, Group, Node, Tag, Ops, Resolved},
             gen_server:cast(global_name_server, Exchange),
             exit(normal);
         _ -> % Ignore garbage.
-            resolver(Node, Tag)
+            resolver(Group, Node, Tag)
     end.
 
 resend_pre_connect(Node) ->
@@ -1358,28 +1428,28 @@ do_ops(Ops, ConnNode, Names_ext, ExtraInfo, S0) ->
 %% The extra nodedown messages generated here also take care of the
 %% case that a nodedown message is received _before_ the operations
 %% are run.
-sync_others(Nodes) ->
+sync_others(Group, Nodes) ->
     N = case application:get_env(kernel, ?N_CONNECT_RETRIES) of
             {ok, NRetries} when is_integer(NRetries), 
                                 NRetries >= 0 -> NRetries;
             _ -> ?DEFAULT_N_CONNECT_RETRIES
         end,
     lists:foreach(fun(Node) -> 
-                          spawn(fun() -> sync_other(Node, N) end)
+                          spawn(fun() -> sync_other(Group, Node, N) end)
                   end, Nodes).
 
-sync_other(Node, N) ->
+sync_other(Group, Node, N) ->
     erlang:monitor_node(Node, true, [allow_passive_connect]),
     receive
         {nodedown, Node} when N > 0 ->
-            sync_other(Node, N - 1);
+            sync_other(Group, Node, N - 1);
         {nodedown, Node} ->
             ?trace({missing_nodedown, {node, Node}}),
             error_logger:warning_msg("global: ~w failed to connect to ~w\n",
                                      [node(), Node]),
             global_name_server ! {extra_nodedown, Node}
     after 0 ->
-            gen_server:cast({global_name_server,Node}, {in_sync,node(),true})
+            gen_server:cast({global_name_server, Node}, {in_sync, Group, node(),true})
     end.
     % monitor_node(Node, false),
     % exit(normal).
@@ -2044,8 +2114,9 @@ handle_nodedown(Node, S) ->
     NewS = cancel_locker(Node, S, get({sync_tag_my, Node})),
     NewS#state.the_locker ! {remove_from_known, Node},
     reset_node_state(Node),
-    NewS#state{known = lists:delete(Node, Known),
-               synced = lists:delete(Node, Syncs)}.
+    NewS#state{known = [{G, lists:delete(Node, N)}||{G, N}<-Known, N/=[Node]],
+               synced = [{G, lists:delete(Node, N)}||{G, N}<-Syncs, N/=[Node]]}.
+
 
 get_names() ->
     ets:select(global_names, 
@@ -2137,7 +2208,7 @@ check_sync_nodes() ->
 	{ok, NodesNG} ->
 	    %% global_groups parameter is defined, we are not allowed to sync
 	    %% with nodes not in our own global group.
-	    intersection(nodes(), NodesNG);
+            intersection(nodes(), NodesNG);
 	{error, _} = Error ->
 	    Error
     end.
