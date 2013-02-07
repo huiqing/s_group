@@ -899,60 +899,20 @@ handle_cast(_Cast, S) ->
 %%% the own global group.
 %%%====================================================================================
 handle_info({nodeup, Node}, S) when S#state.sync_state =:= no_conf ->
-    %%io:format("~p>>>>> nodeup, Node ~p ~n",[node(), Node]),
-    ?debug({"NodeUp:",  node(), Node}),
-    send_monitor(S#state.monitor, {nodeup, Node}, S#state.sync_state),
-    global_name_server ! {nodeup, no_group, Node},
-    {noreply, S};
+    case application:get_env(kernel, s_groups) of 
+        undefined ->
+            %%io:format("~p>>>>> nodeup, Node ~p ~n",[node(), Node]),
+            ?debug({"NodeUp:",  node(), Node}),
+            send_monitor(S#state.monitor, {nodeup, Node}, S#state.sync_state),
+            global_name_server ! {nodeup, no_group, Node},
+            {noreply, S};
+        _ ->
+         handle_node_up(Node,S)
+    end;            
 handle_info({nodeup, Node}, S) ->
     %% io:format("~p>>>>> nodeup, Node ~p ~n",[node(), Node]),
     ?debug({"NodeUp:",  node(), Node}),
-    OthersNG = case S#state.sync_state of
-		   synced ->
-		       X = (catch rpc:call(Node, s_group, get_own_s_groups_with_nodes, [])),
-		       case X of
-			   X when is_list(X) ->
-			       X;
-			   _ ->
-			       []
-		       end;
-		   no_conf ->
-		       []
-	       end,
-    ?debug({"OthersNG:",OthersNG}),
-    OwnNGs = get_own_s_groups_with_nodes(),
-    ?debug({"ownsNG:",OwnNGs}),
-    NNC = lists:delete(Node, S#state.no_contact),
-    NSE = lists:delete(Node, S#state.sync_error),
-    case shared_s_groups_match(OwnNGs, OthersNG) of 
-        true->
-            OwnGroups = S#state.group_names,
-            OthersGroups = element(1, lists:unzip(OthersNG)),
-            CommonGroups = intersection(OwnGroups, OthersGroups),
-            send_monitor(S#state.monitor, {nodeup, Node}, S#state.sync_state),
-            ?debug({nodeup, OwnGroups, Node, CommonGroups}),
-	    [global_name_server ! {nodeup, Group, Node}||Group<-CommonGroups],  
-	    case lists:member(Node, S#state.nodes) of
-		false ->
-		    NN = lists:sort([Node | S#state.nodes]),
-		    {noreply, S#state{nodes = NN, 
-				      no_contact = NNC,
-				      sync_error = NSE}};
-		true ->
-		    {noreply, S#state{no_contact = NNC,
-				      sync_error = NSE}}
-	    end;
-	false ->
-          	    case {lists:member(Node, get_own_nodes()), 
-		  lists:member(Node, S#state.sync_error)} of
-		{true, false} ->
-		    NSE2 = lists:sort([Node | S#state.sync_error]),
-		    {noreply, S#state{no_contact = NNC,
-				      sync_error = NSE2}};
-		_ ->
-		    {noreply, S}
-	    end
-    end;
+    handle_node_up(Node, S);
 %%%====================================================================================
 %%% A node has crashed. 
 %%% nodedown must always be sent to global; this is a security measurement
@@ -1011,6 +971,66 @@ handle_info({'EXIT', ExitPid, Reason}, S) ->
 handle_info(_Info, S) ->
 %    io:format("***** handle_info = ~p~n",[_Info]),
     {noreply, S}.
+
+handle_node_up(Node, S) ->
+    OthersNG = case S#state.sync_state==no_conf andalso 
+                   application:get_env(kernel, s_groups)==undefined of 
+                   true -> 
+                       [];
+                   false ->
+                       X = (catch rpc:call(Node, s_group, get_own_s_groups_with_nodes, [])),
+		       case X of
+			   X when is_list(X) ->
+			       X;
+			   _ ->
+			       []
+		       end
+               end,
+    ?debug({"OthersNG:",OthersNG}),
+    OwnNGs = get_own_s_groups_with_nodes(),
+    OwnGroups = element(1, lists:unzip(OwnNGs)),
+    ?debug({"ownsNG:",OwnNGs}),
+    NNC = lists:delete(Node, S#state.no_contact),
+    NSE = lists:delete(Node, S#state.sync_error),
+    case shared_s_groups_match(OwnNGs, OthersNG) of 
+        true->
+            %% OwnGroups =  S#state.group_names,
+            OthersGroups = element(1, lists:unzip(OthersNG)),
+            CommonGroups = intersection(OwnGroups, OthersGroups),
+            send_monitor(S#state.monitor, {nodeup, Node}, S#state.sync_state),
+            ?debug({nodeup, OwnGroups, Node, CommonGroups}),
+	    [global_name_server ! {nodeup, Group, Node}||Group<-CommonGroups],  
+	    case lists:member(Node, S#state.nodes) of
+		false ->
+		    NN = lists:sort([Node | S#state.nodes]),
+		    {noreply, S#state{
+                                sync_state=synced,
+                                group_names = OwnGroups,
+                                nodes = NN, 
+                                no_contact = NNC,
+                                sync_error = NSE}};
+		true ->
+		    {noreply, S#state{
+                                sync_state=synced,
+                                group_names = OwnGroups,
+                                no_contact = NNC,
+                                sync_error = NSE}}
+	    end;
+	false ->
+            case {lists:member(Node, get_own_nodes()), 
+		  lists:member(Node, S#state.sync_error)} of
+		{true, false} ->
+		    NSE2 = lists:sort([Node | S#state.sync_error]),
+		    {noreply, S#state{
+                                sync_state = synced,
+                                group_names = OwnGroups,
+                                no_contact = NNC,
+                                sync_error = NSE2}};
+                _ ->
+                    {noreply, S#state{sync_state=synced,
+                                      group_names = OwnGroups}}
+	    end
+    end.
 
 
 
