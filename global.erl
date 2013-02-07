@@ -91,7 +91,6 @@
 %%-define(debug(Term), erlang:display(Term)).
 
 
-
 %%-----------------------------------------------------------------
 %% connect_all = boolean() - true if we are supposed to set up a
 %%                           fully connected net
@@ -982,7 +981,7 @@ handle_node_up(Group, Node, S0) ->
             NotAPid = no_longer_a_pid,
             Locker = {locker, NotAPid, S1#state.known, S1#state.the_locker},
             InitC = {init_connect, {?vsn, MyTag}, node(), Locker},
-            ?debug(IntC),
+            ?debug(InitC),
 	    Rs = S1#state.resolvers,
             ?trace({casting_init_connect, {node,Node},{initmessage,InitC},
                     {resolvers,Rs}}),
