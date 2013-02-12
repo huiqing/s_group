@@ -86,7 +86,7 @@
 -define(vsn, 5).
 
 
--define(debug(_), ok).
+-define(debug(_), ok). 
 
 %%-define(debug(Term), erlang:display(Term)).
 
@@ -950,18 +950,20 @@ handle_info(Message, S) ->
     {noreply, S}.
 
 handle_node_up(Group, Node, S0) ->
-    IsKnown = lists:member(Node, case lists:keyfind(Group, 1, S0#state.known) of 
-                                     false -> [];
-                                     {Group, Ns} -> Ns
-                                 end) or
+    S1 = replace_no_group(Group, S0),
+    IsKnown = lists:member(Node, 
+                           case lists:keyfind(Group, 1, S1#state.known) of
+                               false -> [];
+                               {Group, Ns} -> Ns
+                           end) or
     %% This one is only for double nodeups (shouldn't occur!)
-        lists:keymember(Node, 1, S0#state.resolvers),
+        lists:keymember(Node, 1, S1#state.resolvers),
     ?debug({'####', nodeup, {node, Group, Node}, {isknown,IsKnown}}),
     ?trace({'####', nodeup, {node,Node}, {isknown,IsKnown}}),
-    S1 = trace_message(S0, {nodeup, Node}, []),
+    S2 = trace_message(S1, {nodeup, Node}, []),
     case IsKnown of
 	true ->
-	    {noreply, S1};
+	    {noreply, S2};
 	false ->
 	    resend_pre_connect(Node),
 
@@ -972,23 +974,43 @@ handle_node_up(Group, Node, S0) ->
 	    MyTag = now(),
 	    put({sync_tag_my, Node}, MyTag),
             ?trace({sending_nodeup_to_locker, {node,Node},{mytag,MyTag}}),
-	    S1#state.the_locker ! {nodeup, Node, MyTag},
+	    S2#state.the_locker ! {nodeup, Node, MyTag},
 
             %% In order to be compatible with unpatched R7 a locker
             %% process was spawned. Vsn 5 is no longer compatible with
             %% vsn 3 nodes, so the locker process is no longer needed.
             %% The permanent locker takes its place.
             NotAPid = no_longer_a_pid,
-            Locker = {locker, NotAPid, S1#state.known, S1#state.the_locker},
+            Locker = {locker, NotAPid, S2#state.known, S2#state.the_locker},
             InitC = {init_connect, {?vsn, MyTag}, node(), Locker},
             ?debug(InitC),
-	    Rs = S1#state.resolvers,
+	    Rs = S2#state.resolvers,
             ?trace({casting_init_connect, {node,Node},{initmessage,InitC},
                     {resolvers,Rs}}),
 	    gen_server:cast({global_name_server, Node}, InitC),
             Resolver = start_resolver(Group, Node, MyTag),
-            S = trace_message(S1, {new_resolver, Node}, [MyTag, Resolver]),
+            S = trace_message(S2, {new_resolver, Node}, [MyTag, Resolver]),
 	    {noreply, S#state{resolvers = [{Node, MyTag, Resolver} | Rs]}}
+    end.
+
+replace_no_group(Group, S) ->
+    Known = S#state.known,
+    Synced =S#state.synced,
+    S1=case lists:keyfind(no_group, 1, Known) of
+           false -> S;
+           {no_group, KnownNodes} ->
+               S#state{
+                 known=lists:keyreplace(
+                         no_group, 1, Known, {Group, KnownNodes})
+                }
+       end,
+    case lists:keyfind(no_group, 1, Synced) of
+        false -> S1;
+        {no_group, SyncedNodes} ->
+            S1#state{
+              synced=lists:keyreplace(
+                       no_group, 1, Synced, {Group, SyncedNodes})
+             }
     end.
 
 
