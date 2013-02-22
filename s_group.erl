@@ -636,7 +636,6 @@ handle_call({s_groups_removed, _NewPara}, _From, S) ->
 %%%====================================================================================
 handle_call({ng_add_check, Node, PubType, OthersNG}, _From, S) ->
     %% Check which nodes are already updated
-    erlang:diaplay("TTTTTTTTTTTTTTTTTTTTTTTTTTTTT\n"),
     OwnNG = get_own_nodes(),
     case S#state.group_publish_type =:= PubType of
 	true ->
