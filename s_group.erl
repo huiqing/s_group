@@ -60,8 +60,7 @@
 
 -define(debug(_), ok).
 
-%%-define(debug(Term), erlang:display(Term)).
-
+%% -define(debug(T), erlang:display({node(), {line,?LINE}, T}))
 %%%====================================================================================
 
 -type publish_type() :: 'hidden' | 'normal'.
@@ -191,6 +190,7 @@ ng_add_check(Node, PubType, OthersNG) ->
 info() ->
     request(info, 3000).
 
+  
 %% ==== ONLY for test suites ====
 registered_names_test(Arg) ->
     request({registered_names_test, Arg}).
@@ -900,16 +900,15 @@ handle_cast(_Cast, S) ->
 handle_info({nodeup, Node}, S) when S#state.sync_state =:= no_conf ->
     case application:get_env(kernel, s_groups) of 
         undefined ->
-            %%io:format("~p>>>>> nodeup, Node ~p ~n",[node(), Node]),
             ?debug({"NodeUp:",  node(), Node}),
             send_monitor(S#state.monitor, {nodeup, Node}, S#state.sync_state),
-            global_name_server ! {nodeup, no_group, Node},
+            GroupName = rpc:call(Node, global, get_s_group_name, []), 
+            global_name_server ! {nodeup, GroupName, Node},
             {noreply, S};
         _ ->
          handle_node_up(Node,S)
     end;            
 handle_info({nodeup, Node}, S) ->
-    %% io:format("~p>>>>> nodeup, Node ~p ~n",[node(), Node]),
     ?debug({"NodeUp:",  node(), Node}),
     handle_node_up(Node, S);
 %%%====================================================================================
@@ -972,13 +971,8 @@ handle_info(_Info, S) ->
     {noreply, S}.
 
 handle_node_up(Node, S) ->
-    OthersNG = case S#state.sync_state==no_conf andalso 
-                   application:get_env(kernel, s_groups)==undefined of 
-                   true -> 
-                       [];
-                   false ->
-                       X = (catch rpc:call(Node, s_group, get_own_s_groups_with_nodes, [])),
-		       case X of
+    OthersNG = case (catch rpc:call(Node, s_group, get_own_s_groups_with_nodes, [])) of
+                   case X of
 			   X when is_list(X) ->
 			       X;
 			   _ ->
@@ -1481,4 +1475,5 @@ update_publish_nodes(PubArg, MyGroup) ->
 %%%====================================================================================
 publish_on_nodes() ->
     publish_on_nodes(publish_arg(), own_group()).
+
 
