@@ -972,12 +972,10 @@ handle_info(_Info, S) ->
 
 handle_node_up(Node, S) ->
     OthersNG = case (catch rpc:call(Node, s_group, get_own_s_groups_with_nodes, [])) of
-                   case X of
-			   X when is_list(X) ->
-			       X;
-			   _ ->
-			       []
-		       end
+                   X when is_list(X) ->
+                       X;
+                   _ ->
+                       []
                end,
     ?debug({"OthersNG:",OthersNG}),
     OwnNGs = get_own_s_groups_with_nodes(),
