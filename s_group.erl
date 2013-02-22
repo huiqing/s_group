@@ -1108,38 +1108,7 @@ grp_tuple({Name, hidden, Nodes}) ->
 grp_tuple({Name, normal, Nodes}) ->
     {Name, normal, Nodes}.
 
-    
-%% config_scan(NodeGrps) ->
-%%     config_scan(NodeGrps, original).
-
-%% config_scan(NodeGrps, original) ->
-%%     case config_scan(NodeGrps, publish_type) of
-%% 	{DefGroupName, _, DefNodes, DefOther} ->
-%% 	    {DefGroupName, DefNodes, DefOther};
-%% 	Error ->
-%% 	    Error
-%%     end;
-%% config_scan(NodeGrps, publish_type) ->
-%%     config_scan(node(), normal, NodeGrps, no_name, [], []).
-
-%% config_scan(_MyNode, PubType, [], Own_name, OwnNodes, OtherNodeGrps) ->
-%%     {Own_name, PubType, lists:sort(OwnNodes), lists:reverse(OtherNodeGrps)};
-%% config_scan(MyNode, PubType, [GrpTuple|NodeGrps], Own_name, OwnNodes, OtherNodeGrps) ->
-%%     {Name, PubTypeGroup, Nodes} = grp_tuple(GrpTuple),
-%%     case lists:member(MyNode, Nodes) of
-%% 	true ->
-%% 	    case Own_name of
-%% 		no_name ->
-%% 		    config_scan(MyNode, PubTypeGroup, NodeGrps, Name, Nodes, OtherNodeGrps);
-%% 		_ ->
-%% 		    {error, {'node defined twice', {Own_name, Name}}}
-%% 	    end;
-%% 	false ->
-%% 	    config_scan(MyNode,PubType,NodeGrps,Own_name,OwnNodes,
-%% 			[{Name, Nodes}|OtherNodeGrps])
-%%     end.
-
-    
+ 
 %%%====================================================================================
 %%% The special process which checks that all nodes in the own global group
 %%% agrees on the configuration.
