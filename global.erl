@@ -61,9 +61,9 @@
 %%% my_tracer is used in testsuites
 -define(trace(_), ok).
 
-%-define(trace(T), (catch my_tracer ! {node(), {line,?LINE}, T})).
+%%-define(trace(T), (catch my_tracer ! {node(), {line,?LINE}, T})).
 
-%-define(trace(T), erlang:display({node(), {line,?LINE}, T})).
+%%-define(trace(T), erlang:display({node(), {line,?LINE}, T})).
 
 %-define(trace(T), erlang:display({format, node(), cs(), T})).
 %cs() ->
@@ -88,7 +88,7 @@
 
 -define(debug(_), ok). 
 
-%%-define(debug(Term), erlang:display(Term)).
+%%-define(debug(Term), erlang:display({"global_name_server:",Term})).
 
 
 %%-----------------------------------------------------------------
@@ -125,6 +125,7 @@
 		resolvers = [], 
 		syncers = []       :: [pid()],
 		node_name = node() :: node(),
+                s_group = no_group ::group_name(),  %% a quick hack for dyamic creation of a_groups;
 		the_locker, the_registrar, trace,
                 global_lock_down = false :: boolean()
                }).
@@ -596,7 +597,6 @@ init([]) ->
         {'noreply', state()} |
 	{'reply', term(), state()} |
 	{'stop', 'normal', 'stopped', state()}.
-
 handle_call({registrar, Fun}, From, S) ->
     S#state.the_registrar ! {trans_all_known, Fun, From},
     {noreply, S};
@@ -661,6 +661,20 @@ handle_call(high_level_trace_get, _From, #state{trace = Trace}=S) ->
 
 handle_call(stop, _From, S) ->
     {stop, normal, stopped, S};
+
+handle_call({set_s_group_name, GroupName}, _From, S) ->
+    {reply, ok, S#state{s_group=GroupName}};
+
+handle_call(get_s_group_name, _From, S) ->
+    {reply, S#state.s_group, S};
+
+handle_call({remove_s_group, GroupName}, _From, S) ->
+    NewS=S#state{known=[{G, Ns}||{G, Ns}<-S#state.known,
+                                 G/=GroupName],
+                 synced=[{G, Ns}||{G, Ns}<-S#state.synced,
+                                  G/=GroupName]
+                },
+    {reply, ok, NewS};
 
 handle_call(Request, From, S) ->
     error_logger:warning_msg("The global_name_server "
@@ -740,7 +754,7 @@ handle_cast({exchange, Node, NameList, _NameExtList, MyTag}, S) ->
 %% and {exchange, ...}.
 handle_cast({exchange_ops, Group, Node, MyTag, Ops, Resolved}, S0) ->  %% added Group by HL;
     %% Sent from the resolver for Node at node().
-    ?trace({exchange_ops, {node,Node}, {ops,Ops},{resolved,Resolved},
+    ?trace({exchange_ops, {node,Node},{group, Group}, {ops,Ops},{resolved,Resolved},
             {mytag,MyTag}}),
     S = trace_message(S0, {exit_resolver, Node}, [MyTag]),
     case get({sync_tag_my, Node}) of
@@ -750,6 +764,8 @@ handle_cast({exchange_ops, Group, Node, MyTag, Ops, Resolved}, S0) ->  %% added 
                          false -> [];
                         {Group, Nodes} -> Nodes
                     end,
+            ?trace({resolved, Group, node(), Resolved, Known,
+                    Known,get_names_ext(),get({sync_tag_his,Node})}),
 	    gen_server:cast({global_name_server, Node},
 			    {resolved, Group, node(), Resolved, Known,
 			     Known,get_names_ext(),get({sync_tag_his,Node})}),
@@ -775,7 +791,7 @@ handle_cast({exchange_ops, Group, Node, MyTag, Ops, Resolved}, S0) ->  %% added 
 handle_cast({resolved, Group, Node, HisResolved, HisKnown, _HisKnown_v2,  %%added Group by HL;
              Names_ext, MyTag}, S) ->
     %% Sent from global_name_server at Node.
-    ?trace({'####', resolved, {his_resolved,HisResolved}, {node,Node}}),
+    ?trace({'####', resolved, {his_resolved,HisResolved}, {node,Node}, {group, Group}}),
     case get({sync_tag_my, Node}) of
 	MyTag -> 
             %% See the comment at handle_case({exchange_ops, ...}).
@@ -820,7 +836,7 @@ handle_cast({in_sync, Group, Node, _IsKnown}, S) ->
                    false -> 
                        [{Group, [Node]}|Synced];
                    {Group, Ss}->
-                       lists:keyreplace(Group,1, Synced,{Group, [Node|Ss]})
+                       lists:keyreplace(Group,1, Synced,{Group, lists:usort([Node|Ss])})
                end,
     {noreply, NewS#state{synced = NSynced}};
 
@@ -950,17 +966,21 @@ handle_info(Message, S) ->
     {noreply, S}.
 
 handle_node_up(Group, Node, S0) ->
-    S1 = replace_no_group(Group, S0),
-    IsKnown = lists:member(Node, 
-                           case lists:keyfind(Group, 1, S1#state.known) of
-                               false -> [];
-                               {Group, Ns} -> Ns
-                           end) or
+    ?debug({"handle node up:", Group, Node, S0}),
+    ?debug({"S0:", S0}),
+    S1 = replace_no_group(Group, S0), %% Test this! HL.
+    KnownNodes =  case lists:keyfind(Group, 1, S1#state.known) of
+                      false -> [];
+                      {Group, Ns} -> Ns
+                  end,
+    IsKnown = lists:member(Node, KnownNodes) orelse
     %% This one is only for double nodeups (shouldn't occur!)
         lists:keymember(Node, 1, S1#state.resolvers),
     ?debug({'####', nodeup, {node, Group, Node}, {isknown,IsKnown}}),
     ?trace({'####', nodeup, {node,Node}, {isknown,IsKnown}}),
+    ?debug({"S1:", S1}),
     S2 = trace_message(S1, {nodeup, Node}, []),
+    ?debug({"S2:", S2}),
     case IsKnown of
 	true ->
 	    {noreply, S2};
@@ -988,29 +1008,40 @@ handle_node_up(Group, Node, S0) ->
             ?trace({casting_init_connect, {node,Node},{initmessage,InitC},
                     {resolvers,Rs}}),
 	    gen_server:cast({global_name_server, Node}, InitC),
+            ?debug({"StartResolver", Group, Node, MyTag}),
             Resolver = start_resolver(Group, Node, MyTag),
             S = trace_message(S2, {new_resolver, Node}, [MyTag, Resolver]),
-	    {noreply, S#state{resolvers = [{Node, MyTag, Resolver} | Rs]}}
+            {noreply, S#state{resolvers = [{Node, MyTag, Resolver} | Rs]}}
     end.
 
-replace_no_group(Group, S) ->
+replace_no_group(Group, S) ->  %% is this right? HL; 20/02/13.
     Known = S#state.known,
     Synced =S#state.synced,
     S1=case lists:keyfind(no_group, 1, Known) of
            false -> S;
            {no_group, KnownNodes} ->
-               S#state{
-                 known=lists:keyreplace(
-                         no_group, 1, Known, {Group, KnownNodes})
-                }
+               Known1 = lists:keydelete(no_group,1, Known),
+               Known2=case lists:keyfind(Group, 1, Known1) of 
+                          false ->
+                              [{Group, KnownNodes}|Known1];
+                          {Group, Known0}-> 
+                              lists:keyreplace(Group,1, Known1, 
+                                               {Group, lists:usort(KnownNodes++Known0)})
+                      end,
+               S#state{known=Known2}
        end,
     case lists:keyfind(no_group, 1, Synced) of
         false -> S1;
         {no_group, SyncedNodes} ->
-            S1#state{
-              synced=lists:keyreplace(
-                       no_group, 1, Synced, {Group, SyncedNodes})
-             }
+            Synced1 =lists:keydelete(no_group,1, Synced), 
+            Synced2 =case lists:keyfind(Group, 1, Synced1) of 
+                         false ->
+                             [{Group, SyncedNodes}|Synced1];
+                         {Group, Synced0}-> 
+                             lists:keyreplace(Group,1, Synced1, 
+                                               {Group, lists:usort(SyncedNodes++Synced0)})
+                     end,
+            S1#state{synced=Synced2}
     end.
 
 
@@ -1200,7 +1231,7 @@ resolved(Group, Node, HisResolved, HisKnown, Names_ext, S0) ->
     S4 = cancel_resolved_locker(Node, F),
     %% See (*) below... we're node b in that description
     AddedNodes = (NewNodes -- Known),
-    NewKnown0 = Known ++ AddedNodes,
+    NewKnown0 = lists:usort(Known ++ AddedNodes),
     S4#state.the_locker ! {add_to_known, AddedNodes},
     NewS = trace_message(S4, {added, AddedNodes}, 
                          [{new_nodes, NewNodes}, {abcast, Known}, {ops,Ops}]),
@@ -1216,7 +1247,7 @@ resolved(Group, Node, HisResolved, HisKnown, Names_ext, S0) ->
                     false -> 
                         [{Group, [Node]}|Synced];
                     {Group, Ss}->
-                        lists:keyreplace(Group,1, Synced,{Group, [Node|Ss]})
+                        lists:keyreplace(Group,1, Synced,{Group, lists:usort([Node|Ss])})
                 end,
     NewS#state{known = NewKnown, 
                synced = NewSynced}.
@@ -1283,7 +1314,8 @@ start_resolver(Group, Node, MyTag) ->
 resolver(Group, Node, Tag) ->
     receive 
         {resolve, NameList, Node} ->
-            ?trace({resolver, {me,self()}, {node,Node}, {namelist,NameList}}),
+            ?debug({resolver, {me,self()}, {node,Node}, {group, Group},
+                    {namelist,NameList}}),
             {Ops, Resolved} = exchange_names(NameList, Node, [], []),
             Exchange = {exchange_ops, Group, Node, Tag, Ops, Resolved},
             gen_server:cast(global_name_server, Exchange),
@@ -2310,3 +2342,32 @@ intersection(_, []) ->
     [];
 intersection(L1, L2) ->
     L1 -- (L1 -- L2).
+
+
+get_s_group_name() ->
+    request(get_s_group_name).
+
+set_s_group_name(GroupName) ->
+    request({set_s_group_name, GroupName}).
+
+reset_s_group_name() ->
+    request({set_s_group_name, no_group}).
+
+remove_s_group(GroupName) ->
+    request({remove_s_group, GroupName}).
+
+request(Req) ->
+    request(Req, infinity).
+
+request(Req, Time) ->
+    case whereis(global_name_server) of
+	P when is_pid(P) ->
+            gen_server:call(global_name_server, Req, Time);
+	_Other -> 
+	    {error, global_name_server_not_runnig}
+    end.
+
+
+    
+
+
