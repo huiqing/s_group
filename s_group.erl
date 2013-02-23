@@ -51,9 +51,11 @@
 
 -export([config_scan/1, config_scan/2]).
 
--export([new_s_group/2, remove_s_group/1, 
+-export([new_s_group/2, remove_s_group/1,
+         s_group_add_nodes/2,
          new_s_group_check/3,
-         remove_s_group_check/1]).
+         remove_s_group_check/1,
+         s_group_add_nodes_check/3]).
 
 %% Internal exports
 -export([sync_init/4]).
@@ -208,6 +210,15 @@ remove_s_group(GroupName) ->
 
 remove_s_group_check(GroupName) ->
     request({remove_s_group_check, GroupName}).
+
+-spec s_group_add_nodes(GroupName::group_name(), Nodes::[node()]) ->
+                               {ok, [node()]} | {error, Reason::term()}.
+
+s_group_add_nodes(GroupName, Nodes) -> 
+    request({s_group_add_nodes, GroupName, Nodes}).
+
+s_group_add_nodes_check(Node, PubType, {GroupName, Nodes}) ->
+    request({s_group_add_nodes_check, Node, PubType, {GroupName, Nodes}}).
 
 %% ==== ONLY for test suites ====
 registered_names_test(Arg) ->
@@ -841,14 +852,88 @@ handle_call({remove_s_group_check, GroupName}, _From, S) ->
     
     {reply, ok, NewS};
 
+
+
+%%%====================================================================================
+%%% add nodes to an existing s_group.
+%%%-spec s_group_add_nodes(GroupName::group_name(), Nodes::[node()]) ->
+%%%                               ok | {error, Reason::term()}.
+%%%====================================================================================
+handle_call({s_group_add_nodes, GroupName, Nodes}, _From, S) ->
+    ?debug({s_group_add_nodes, GroupName, Nodes}),
+    case lists:member(GroupName, S#state.group_names) of 
+        false ->
+            {reply, {error, s_group_name_does_not_exist}, S};
+        true ->
+            GroupNodes = case lists:keyfind(GroupName, 1, S#state.own_grps) of 
+                             {_, Ns}-> Ns;
+                             false -> []  %% this should not happen.
+                         end,
+            case Nodes -- GroupNodes of 
+                [] -> {reply, ok, S};
+                NewNodes ->
+                    ok=global:set_s_group_name(GroupName),
+                    NodesToDisConnect =nodes(connected) -- (Nodes++S#state.nodes),
+                    ?debug({"NodesToDisconent", NodesToDisConnect}),
+                    force_nodedown(NodesToDisConnect),
+                    NewGroupNodes=lists:sort(NewNodes++GroupNodes),
+                    NewConf=mk_new_s_group_conf(GroupName, NewGroupNodes),
+                    ?debug({"Newconf:", NewConf}),
+                    application:set_env(kernel, s_groups, NewConf),
+                    NewGroupNodes=lists:sort(NewNodes++GroupNodes),
+                    NGACArgs = [node(), normal, {GroupName, NewGroupNodes}],
+                    ?debug({"NGACArgs:",NGACArgs}),
+                    {NS, NNC, NSE} =
+                        lists:foldl(fun(Node, {NN_acc, NNC_acc, NSE_acc}) -> 
+                                            case rpc:call(Node, s_group, s_group_add_nodes_check, NGACArgs) of
+                                                {badrpc, _} ->
+                                                    {NN_acc, [Node | NNC_acc], NSE_acc};
+                                                agreed ->
+                                                    {[Node | NN_acc], NNC_acc, NSE_acc};
+                                                not_agreed ->
+                                                    {NN_acc, NNC_acc, [Node | NSE_acc]}
+                                            end
+                                    end,
+                                    {[], [], []}, lists:delete(node(), NewGroupNodes)),
+                    ?debug({"NS_NNC_NSE1:",  {NS, NNC, NSE}}),
+                    ok = global:reset_s_group_name(),
+                    NewS = S#state{sync_state = synced, 
+                                   nodes = lists:usort(NewNodes++S#state.nodes),
+                                   sync_error = lists:usort(NSE++S#state.sync_error--NS), 
+                                   no_contact = lists:usort(NNC++S#state.no_contact--NS),
+                                   own_grps =  lists:keyreplace(GroupName,1, S#state.own_grps,
+                                                                {GroupName, NewGroupNodes})                                
+                                  },
+                    ?debug({"NewS:", [NewS]}),
+                    {reply, ok, NewS}
+            end
+    end;
+           
+handle_call({s_group_add_nodes_check, Node, _PubType, {GroupName, Nodes}}, _From, S) ->
+    ?debug({{s_group_add_nodes_check, Node, _PubType, {GroupName, Nodes}}, _From, S}),
+    NewConf=mk_new_s_group_conf(GroupName, Nodes),
+    application:set_env(kernel, s_groups, NewConf),
+    NewGroupNames = case lists:member(GroupName, S#state.group_names) of
+                        true->S#state.group_names;
+                        false-> lists:sort([GroupName|S#state.group_names])
+                    end,
+    NewOwnGroups =  case lists:keyfind(GroupName, 1, S#state.own_grps) of 
+                        false -> [{GroupName, Nodes}];
+                        _-> lists:keyreplace(GroupName, 1, 
+                                             S#state.own_grps, 
+                                             {GroupName, Nodes})
+                    end,
+    NewS= S#state{sync_state = synced, 
+                  group_names = NewGroupNames, 
+                  nodes = lists:usort(S#state.nodes++Nodes),
+                  sync_error = lists:delete(Node, S#state.sync_error), 
+                  no_contact=lists:delete(Node, S#state.no_contact),
+                  own_grps = NewOwnGroups},
+    {reply, agreed, NewS};
 %%%====================================================================================
 handle_call(Call, _From, S) ->
      %%io:format("***** handle_call ~p~n",[Call]),
     {reply, {illegal_message, Call}, S}.
-
-
-
-
 
 %%%====================================================================================
 %%% registered_names({node, Node}) -> [Name] | {error, ErrorMessage}
@@ -1625,14 +1710,20 @@ publish_on_nodes() ->
 %% assume this is no s_group name conflict. HL.
 -spec mk_new_s_group_conf(GroupName::group_name(), Nodes::[node()])
                          -> [{group_name(), [node()]}].
-mk_new_s_group_conf(GroupName, Nodes) ->
+mk_new_s_group_conf(GroupName, Nodes0) ->
+    Nodes = lists:sort(Nodes0),
     case application:get_env(kernel, s_groups) of
         undefined ->
             [{GroupName, Nodes}];
         {ok, []} ->
              [{GroupName, Nodes}];
         {ok, NodeGroups} ->
-            [{GroupName, Nodes}|NodeGroups]
+            case lists:keyfind(GroupName, 1, NodeGroups) of 
+                false ->
+                    [{GroupName, Nodes}|NodeGroups];
+                _ ->
+                    lists:keyreplace(GroupName,1, NodeGroups,{GroupName, Nodes})
+            end
     end.
 
 
