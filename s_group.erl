@@ -51,6 +51,8 @@
 
 -export([config_scan/1, config_scan/2]).
 
+-export([new_s_group/2,new_s_group_check/3]).
+
 %% Internal exports
 -export([sync_init/4]).
 
@@ -58,9 +60,9 @@
 -define(cc_vsn, 2).
 
 
--define(debug(_), ok).
+%%-define(debug(_), ok).
 
-%% -define(debug(T), erlang:display({node(), {line,?LINE}, T}))
+-define(debug(T), erlang:display({node(), {line,?LINE}, T})).
 %%%====================================================================================
 
 -type publish_type() :: 'hidden' | 'normal'.
@@ -190,7 +192,14 @@ ng_add_check(Node, PubType, OthersNG) ->
 info() ->
     request(info, 3000).
 
-  
+-spec new_s_group(GroupName::group_name(), Nodes::[node()]) ->
+                         ok|{error, Reason::term()}.
+new_s_group(GroupName, Nodes) ->
+    request({new_s_group, GroupName, Nodes}).
+   
+new_s_group_check(Node, PubType, {GroupName, Nodes}) ->
+    request({new_s_group_check, Node, PubType, {GroupName, Nodes}}).
+
 %% ==== ONLY for test suites ====
 registered_names_test(Arg) ->
     request({registered_names_test, Arg}).
@@ -677,7 +686,6 @@ handle_call(info, _From, S) ->
 handle_call(get, _From, S) ->
     {reply, get(), S};
 
-
 %%%====================================================================================
 %%% Only for test suites. These tests when the search process exits.
 %%%====================================================================================
@@ -703,6 +711,70 @@ handle_call({whereis_name_test, 'test3844zty'}, From, S) ->
 handle_call({whereis_name_test, _Name}, _From, S) ->
     {reply, {error, illegal_function_call}, S};
 
+
+
+%%%====================================================================================
+%%% Create a new s_group.
+%%% -spec new_s_group(GroupName::group_name(), Nodes::[node()]) ->
+%%%                         ok|{error, Reason::term()}.
+%%%====================================================================================
+handle_call({new_s_group, GroupName, Nodes}, _From, S) ->
+    ?debug({new_s_group, GroupName, Nodes}),
+    case lists:member(GroupName, S#state.own_grps) of 
+        true ->
+            {reply, {error, s_group_name_in_use}, S};
+        false ->
+            ok=global:set_s_group_name(GroupName),
+            NewNodes = Nodes -- S#state.nodes,
+            NodesToDisConnect =nodes(connected) -- NewNodes,
+            ?debug({"NodesToDisconent", NodesToDisConnect}),
+            force_nodedown(nodes(connected) -- NewNodes),
+            NewConf=mk_new_s_group_conf(GroupName, Nodes),
+            application:set_env(kernel, s_groups, NewConf),
+            NGACArgs = [node(), normal, {GroupName, Nodes}],
+            OtherNodes = lists:delete(node(), Nodes),
+            {NS, NNC, NSE} =
+                lists:foldl(fun(Node, {NN_acc, NNC_acc, NSE_acc}) -> 
+                                    case rpc:call(Node, s_group, new_s_group_check, NGACArgs) of
+                                        {badrpc, _} ->
+                                            {NN_acc, [Node | NNC_acc], NSE_acc};
+                                        agreed ->
+                                            {[Node | NN_acc], NNC_acc, NSE_acc};
+                                        not_agreed ->
+                                            {NN_acc, NNC_acc, [Node | NSE_acc]}
+                                    end
+                            end,
+                            {[], [], []}, OtherNodes),
+            ?debug({"NS_NNC_NSE1:",  {NS, NNC, NSE}}),
+            NewS = S#state{sync_state = synced, 
+                           group_names = [GroupName|S#state.group_names], 
+                           nodes = lists:usort(Nodes++S#state.nodes),
+                           sync_error = lists:usort(NSE++S#state.sync_error--NS), 
+                           no_contact = lists:usort(NNC++S#state.no_contact--NS),
+                           own_grps = [{GroupName,Nodes}|S#state.own_grps] 
+                           },
+            {reply, ok, NewS}
+    end;
+ 
+handle_call({new_s_group_check, Node, _PubType, {GroupName, Nodes}}, _From, S) ->
+    ?debug({{new_s_group_check, Node, _PubType, {GroupName, Nodes}}, _From, S}),
+    OwnGroups =S#state.own_grps,
+    case lists:member(GroupName, OwnGroups) of 
+        true ->
+            {reply, {error, not_agreed}, S};
+        false ->
+            NewConf=mk_new_s_group_conf(GroupName, Nodes),
+            application:set_env(kernel, s_groups, NewConf),
+            NewS= S#state{sync_state = synced, 
+                          group_names = [GroupName|S#state.group_names], 
+                          nodes = lists:usort(S#state.nodes++Nodes),
+                          sync_error = lists:delete(Node, S#state.sync_error), 
+                          no_contact=lists:delete(Node, S#state.no_contact),
+                          own_grps = [{GroupName,Nodes}|OwnGroups]},
+            {reply, agreed, NewS}
+    end; 
+
+%%%====================================================================================
 handle_call(Call, _From, S) ->
      %%io:format("***** handle_call ~p~n",[Call]),
     {reply, {illegal_message, Call}, S}.
@@ -906,11 +978,19 @@ handle_info({nodeup, Node}, S) when S#state.sync_state =:= no_conf ->
             global_name_server ! {nodeup, GroupName, Node},
             {noreply, S};
         _ ->
-         handle_node_up(Node,S)
+            handle_node_up(Node,S)
     end;            
-handle_info({nodeup, Node}, S) ->
+handle_info({nodeup, Node}, S) ->  %% Need to test!!!
     ?debug({"NodeUp:",  node(), Node}),
-    handle_node_up(Node, S);
+    case  rpc:call(Node, global, get_s_group_name, []) of 
+        no_group ->
+            handle_node_up(Node, S);
+        GroupName ->
+            send_monitor(S#state.monitor, {nodeup, Node}, S#state.sync_state),
+            GroupName = rpc:call(Node, global, get_s_group_name, []), 
+            global_name_server ! {nodeup, GroupName, Node},
+            {noreply, S}
+    end;
 %%%====================================================================================
 %%% A node has crashed. 
 %%% nodedown must always be sent to global; this is a security measurement
@@ -993,7 +1073,7 @@ handle_node_up(Node, S) ->
 	    [global_name_server ! {nodeup, Group, Node}||Group<-CommonGroups],  
 	    case lists:member(Node, S#state.nodes) of
 		false ->
-		    NN = lists:sort([Node | S#state.nodes]),
+		    NN = lists:usort([Node | S#state.nodes]),
 		    {noreply, S#state{
                                 sync_state=synced,
                                 group_names = OwnGroups,
@@ -1009,10 +1089,10 @@ handle_node_up(Node, S) ->
 	    end;
 	false ->
             case {lists:member(Node, get_own_nodes()), 
-		  lists:member(Node, S#state.sync_error)} of
-		{true, false} ->
-		    NSE2 = lists:sort([Node | S#state.sync_error]),
-		    {noreply, S#state{
+	          lists:member(Node, S#state.sync_error)} of
+	        {true, false} ->
+	            NSE2 = lists:usort([Node | S#state.sync_error]),
+	            {noreply, S#state{
                                 sync_state = synced,
                                 group_names = OwnGroups,
                                 no_contact = NNC,
@@ -1474,4 +1554,17 @@ update_publish_nodes(PubArg, MyGroup) ->
 publish_on_nodes() ->
     publish_on_nodes(publish_arg(), own_group()).
 
+
+%% assume this is no s_group name conflict. HL.
+-spec mk_new_s_group_conf(GroupName::group_name(), Nodes::[node()])
+                         -> [{group_name(), [node()]}].
+mk_new_s_group_conf(GroupName, Nodes) ->
+    case application:get_env(kernel, s_groups) of
+        undefined ->
+            [{GroupName, Nodes}];
+        {ok, []} ->
+             [{GroupName, Nodes}];
+        {ok, NodeGroups} ->
+            [{GroupName, Nodes}|NodeGroups]
+    end.
 
