@@ -675,7 +675,41 @@ handle_call({remove_s_group, GroupName}, _From, S) ->
                                   G/=GroupName]
                 },
     {reply, ok, NewS};
-
+handle_call({remove_s_group_nodes,GroupName, NodesToRm}, _From, S) ->
+    case lists:member(node(), NodesToRm) of 
+        true ->
+            NewS=S#state{known=[{G, Ns}||{G, Ns}<-S#state.known,
+                                         G/=GroupName],
+                         synced=[{G, Ns}||{G, Ns}<-S#state.synced,
+                                          G/=GroupName]
+                        },
+            {reply, ok, NewS};
+        false ->
+            KnownGroupNodes = case lists:keyfind(GroupName,1, S#state.known) of 
+                                  false -> [];
+                                  {_, Ns} -> Ns
+                              end,
+            NewKnownGroupNodes = KnownGroupNodes -- NodesToRm,
+            SyncedGroupNodes =  case lists:keyfind(GroupName, 1, S#state.synced)of 
+                                    false -> [];
+                                    {_, Ns1} -> Ns1
+                                end,
+            NewSyncedGroupNodes = SyncedGroupNodes -- NodesToRm,
+            NewKnown = case NewKnownGroupNodes of 
+                           [] -> lists:keydelete(GroupName, 1, KnownGroupNodes);
+                           _ -> lists:keyreplace(GroupName,1,  S#state.known,
+                                                 {GroupName, NewKnownGroupNodes})
+                       end,
+            NewSynced= case NewSyncedGroupNodes of 
+                           [] -> lists:keydelete(GroupName, 1, SyncedGroupNodes);
+                           _ -> lists:keyreplace(GroupName,1, S#state.synced,  
+                                                 {GroupName,NewSyncedGroupNodes})
+                       end,
+            NewS=S#state{known= NewKnown,
+                         synced=NewSynced
+                        },
+            {reply, ok, NewS}
+    end;
 handle_call(Request, From, S) ->
     error_logger:warning_msg("The global_name_server "
                              "received an unexpected message:\n"
@@ -2355,6 +2389,9 @@ reset_s_group_name() ->
 
 remove_s_group(GroupName) ->
     request({remove_s_group, GroupName}).
+
+remove_s_group_nodes(GroupName, NodesToRm)->
+    request({remove_s_group_nodes,GroupName, NodesToRm}).
 
 request(Req) ->
     request(Req, infinity).
