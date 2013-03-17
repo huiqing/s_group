@@ -59,13 +59,11 @@
 %% Internal exports
 -export([sync_init/4]).
 
-
 -define(cc_vsn, 2).
 
+%%-define(debug(_), ok).
 
--define(debug(_), ok).
-
-%%-define(debug(T), erlang:display({node(), {line,?LINE}, T})).
+-define(debug(T), erlang:display({node(), {line,?LINE}, T})).
 %%%====================================================================================
 
 -type publish_type() :: 'hidden' | 'normal'.
@@ -101,8 +99,8 @@
                 own_grps =[]                :: [{group_name(), [node()]}], %% added by HL;
 		node_name = node()          :: node(),
 		monitor = []                :: [pid()],
-		publish_type = normal       :: publish_type(),
-		group_publish_type = normal :: publish_type()}).
+		publish_type = normal       :: publish_type(),    %% node  default pubtype is normal
+                group_publish_type = hidden :: publish_type()}).  %% all s_groups are hidden?
 
 
 
@@ -180,7 +178,9 @@ ng_add_check(Node, PubType, OthersNG) ->
                    | {'no_contact', Nodes :: [node()]}
                    | {'own_groups', OwnGroups::[group_tuple()]}
                    | {'other_groups', Groups :: [group_tuple()]}
-                   | {'monitoring', Pids :: [pid()]}.
+                   | {'monitoring', Pids :: [pid()]}
+                   | {'publish_type', PubType:: publish_type()}
+                   | {'group_publish__type', PubType:: publish_type()}.
 
 -spec info() -> [info_item()].
 info() ->
@@ -189,8 +189,15 @@ info() ->
 -spec new_s_group(GroupName::group_name(), Nodes::[node()]) ->
                          ok|{error, Reason::term()}.
 new_s_group(GroupName, Nodes) ->
-    request({new_s_group, GroupName, Nodes}).
-   
+    case request({new_s_group, GroupName, Nodes}) of 
+        ok ->
+            ok=request({new_s_group_1, GroupName, Nodes}),
+            timer:sleep(1000),
+             sync();
+        {error, Reason} ->
+            Reason
+    end.
+
 new_s_group_check(Node, PubType, {GroupName, Nodes}) ->
     request({new_s_group_check, Node, PubType, {GroupName, Nodes}}).
 
@@ -303,15 +310,16 @@ init([]) ->
                     {DefSGroupNamesT1, DefSGroupNodesT1}=lists:unzip(DefOwnSGroupsT1),
                     DefSGroupNamesT = lists:usort(DefSGroupNamesT1),
                     DefSGroupNodesT = lists:usort(lists:append(DefSGroupNodesT1)),
-                    update_publish_nodes(PT, {normal, DefSGroupNodesT}),
+                    update_publish_nodes(PT, {hidden, DefSGroupNodesT}),  
                     %% First disconnect any nodes not belonging to our own group
                     disconnect_nodes(nodes(connected) -- DefSGroupNodesT),
                     lists:foreach(fun(Node) ->
                                           erlang:monitor_node(Node, true)
                                   end,
                                   DefSGroupNodesT),
-                    NewState = #state{publish_type = PT, group_publish_type = normal,
-                                      sync_state = synced, group_names = DefSGroupNamesT,
+                    NewState = #state{publish_type = PT,
+                                      sync_state = synced, 
+                                      group_names = DefSGroupNamesT,
                                       no_contact = lists:delete(node(), DefSGroupNodesT),
                                       own_grps = DefOwnSGroupsT1,
                                       other_grps = DefOtherSGroupsT},
@@ -344,16 +352,21 @@ handle_call(sync, _From, S) ->
 		    {error, _Error2} ->
 			exit({error, {'invalid s_groups definition', NodeGrps}});
                     {ok, DefOwnSGroupsT, DefOtherSGroupsT} ->
+                        ?debug({"sync:", {ok, DefOwnSGroupsT, DefOtherSGroupsT}}),
                         DefOwnSGroupsT1 = [{GroupName,GroupNodes}||
                                               {GroupName, _PubType, GroupNodes}
                                                   <- DefOwnSGroupsT],
                         {DefSGroupNamesT1, DefSGroupNodesT1}=lists:unzip(DefOwnSGroupsT1),
                         DefSGroupNamesT = lists:usort(DefSGroupNamesT1),
                         DefSGroupNodesT = lists:usort(lists:append(DefSGroupNodesT1)),
-                        PubType = normal,
-                        update_publish_nodes(S#state.publish_type, {PubType, DefSGroupNodesT}),
+                        ?debug({"sync1:", DefSGroupNamesT, DefSGroupNodesT}),
+                        update_publish_nodes(S#state.publish_type, {hidden, DefSGroupNodesT}),
                         %% First inform global on all nodes not belonging to our own group
-			disconnect_nodes(nodes(connected) -- DefSGroupNodesT),
+                        NoGroupNodes =  nodes(connected) -- DefSGroupNodesT,
+                        ?debug({"remove_from_no_group", node(), NoGroupNodes}),
+                        [rpc:call(N, global, remove_from_no_group, [node()])
+                         || N <-NoGroupNodes],
+                        %%	disconnect_nodes(nodes(connected) -- DefSGroupNodesT), %%HL: is this needed?
 			%% Sync with the nodes in the own group
                         kill_s_group_check(),
                         Pid = spawn_link(?MODULE, sync_init, 
@@ -412,7 +425,7 @@ handle_call(own_nodes, _From, S) ->
 		    [node() | nodes()];
 		synced ->
 		    get_own_nodes()
-                                                %		    S#state.nodes
+                 %		    S#state.nodes
 	    end,
     {reply, Nodes, S};
 
@@ -592,14 +605,17 @@ handle_call({ng_add_check, Node, PubType, OthersNG}, _From, S) ->
 handle_call(info, _From, S) ->    
     Reply = [{state,          S#state.sync_state},
 	     {own_group_names, S#state.group_names},
-	     {own_group_nodes, get_own_nodes()},
+             {own_group_nodes, lists:usort(lists:append(element(2,lists:unzip(S#state.own_grps))))},
+           %%   {own_group_nodes, get_own_nodes()},
              %{"nodes()",      lists:sort(nodes())},
 	     {synced_nodes,   S#state.nodes},
 	     {sync_error,     S#state.sync_error},
 	     {no_contact,     S#state.no_contact},
              {own_groups,     S#state.own_grps},
 	     {other_groups,   S#state.other_grps},
-	     {monitoring,     S#state.monitor}],
+             {publish_type,    S#state.publish_type},
+             {group_publish_type, S#state.group_publish_type},
+              {monitoring,     S#state.monitor}],
 
     {reply, Reply, S};
 
@@ -640,60 +656,62 @@ handle_call({whereis_name_test, _Name}, _From, S) ->
 %%%====================================================================================
 handle_call({new_s_group, GroupName, Nodes}, _From, S) ->
     ?debug({new_s_group, GroupName, Nodes}),
-    case lists:member(GroupName, S#state.group_names) of 
+    OtherNodes = lists:delete(node(), Nodes),
+    OwnKnownSgroupNames = S#state.group_names, 
+    OthersKnownSgroupNames = known_s_group_names(OtherNodes),
+    KnownSgroupNames=OwnKnownSgroupNames ++  OthersKnownSgroupNames, 
+    ?debug({"KnownSGroupNames:",KnownSgroupNames}), 
+    case lists:member(GroupName, KnownSgroupNames) of 
         true ->
             {reply, {error, s_group_name_in_use}, S};
         false ->
-            ok=global:set_s_group_name(GroupName),
-            NewNodes = Nodes -- S#state.nodes,
-            %%NodesToDisConnect =nodes(connected) -- NewNodes,
-            %%?debug({"NodesToDisconent", NodesToDisConnect}),
-            force_nodedown(nodes(connected) -- NewNodes),
-            NewConf=mk_new_s_group_conf(GroupName, Nodes),
-            application:set_env(kernel, s_groups, NewConf),
-            NGACArgs = [node(), normal, {GroupName, Nodes}],
-            OtherNodes = lists:delete(node(), Nodes),
-            {NS, NNC, NSE} =
-                lists:foldl(fun(Node, {NN_acc, NNC_acc, NSE_acc}) -> 
-                                    case rpc:call(Node, s_group, new_s_group_check, NGACArgs) of
-                                        {badrpc, _} ->
-                                            {NN_acc, [Node | NNC_acc], NSE_acc};
-                                        agreed ->
-                                            {[Node | NN_acc], NNC_acc, NSE_acc};
-                                        not_agreed ->
-                                            {NN_acc, NNC_acc, [Node | NSE_acc]}
-                                    end
-                            end,
-                            {[], [], []}, OtherNodes),
-            ?debug({"NS_NNC_NSE1:",  {NS, NNC, NSE}}),
-            ok = global:reset_s_group_name(),
-            NewS = S#state{sync_state = synced, 
-                           group_names = [GroupName|S#state.group_names], 
-                           nodes = lists:usort(Nodes++S#state.nodes),
-                           sync_error = lists:usort(NSE++S#state.sync_error--NS), 
-                           no_contact = lists:usort(NNC++S#state.no_contact--NS),
-                           own_grps = [{GroupName,Nodes}|S#state.own_grps] 
-                           },
-            {reply, ok, NewS}
+            {reply, ok, S}
     end;
- 
-handle_call({new_s_group_check, Node, _PubType, {GroupName, Nodes}}, _From, S) ->
-    ?debug({{new_s_group_check, Node, _PubType, {GroupName, Nodes}}, _From, S}),
-    OwnGroups =S#state.own_grps,
-    case lists:member(GroupName, OwnGroups) of 
-        true ->
-            {reply, {error, not_agreed}, S};
-        false ->
-            NewConf=mk_new_s_group_conf(GroupName, Nodes),
-            application:set_env(kernel, s_groups, NewConf),
-            NewS= S#state{sync_state = synced, 
-                          group_names = [GroupName|S#state.group_names], 
-                          nodes = lists:usort(S#state.nodes++Nodes),
-                          sync_error = lists:delete(Node, S#state.sync_error), 
-                          no_contact=lists:delete(Node, S#state.no_contact),
-                          own_grps = [{GroupName,Nodes}|OwnGroups]},
-            {reply, agreed, NewS}
-    end; 
+
+handle_call({new_s_group_1, GroupName, Nodes}, _From, S) ->
+    ?debug({new_s_group, GroupName, Nodes}),
+    OtherNodes = lists:delete(node(), Nodes),
+    ?debug({conntect, nodes(connected)}),
+    NewConf=mk_new_s_group_conf(GroupName, Nodes),
+    application:set_env(kernel, s_groups, NewConf),
+    NGACArgs = [node(), hidden, {GroupName, Nodes}],
+    {_NS, _NNC, _NSE} =
+        lists:foldl(fun(Node, {NN_acc, NNC_acc, NSE_acc}) -> 
+                            case rpc:call(Node, s_group, new_s_group_check, NGACArgs) of
+                                {badrpc, _} ->
+                                    {NN_acc, [Node | NNC_acc], NSE_acc};
+                                agreed ->
+                                            {[Node | NN_acc], NNC_acc, NSE_acc};
+                                not_agreed ->
+                                    {NN_acc, NNC_acc, [Node | NSE_acc]}
+                            end
+                    end,
+                    {[], [], []}, OtherNodes),
+    NewS= S#state{sync_state = synced, 
+                  group_names = [GroupName|S#state.group_names], 
+                  sync_error = Nodes ++ S#state.sync_error, 
+                  no_contact= Nodes ++ S#state.no_contact,
+                  own_grps = [{GroupName,Nodes}|S#state.own_grps]},
+    {reply, ok, NewS};
+
+handle_call({new_s_group_check, Node, PubType, {GroupName, Nodes}}, _From, S) ->
+    ?debug({{new_s_group_check, Node, PubType, {GroupName, Nodes}}, _From, S}),
+    NewConf=mk_new_s_group_conf(GroupName, Nodes),
+    application:set_env(kernel, s_groups, NewConf),
+    PT = publish_arg(),
+    update_publish_nodes(PT, {PubType, Nodes}),  .
+    OtherNodes = Nodes -- [node()],
+    GroupNodes = Nodes++lists:append(element(2,lists:unzip(S#state.own_grps))),
+    NoGroupNodes =  nodes(connected) -- GroupNodes,
+    ?debug({"remove_from_no_group", node(), NoGroupNodes}),
+    [rpc:call(N, global, remove_from_no_group, [node()])
+     || N <-NoGroupNodes],
+    NewS= S#state{sync_state = synced, 
+                  group_names = [GroupName|S#state.group_names], 
+                  sync_error = OtherNodes ++ S#state.sync_error, 
+                  no_contact= OtherNodes  ++ S#state.no_contact,
+                  own_grps = [{GroupName,Nodes}|S#state.own_grps]},
+    {reply, agreed, NewS};
 
 %%%====================================================================================
 %%% Remove a s_group.
@@ -1103,22 +1121,25 @@ handle_cast(_Cast, S) ->
 %%% the own global group.
 %%%====================================================================================
 handle_info({nodeup, Node}, S) when S#state.sync_state =:= no_conf ->
-    case application:get_env(kernel, s_groups) of 
-        undefined ->
+    %% case application:get_env(kernel, s_groups) of 
+    %%     undefined ->
             ?debug({"NodeUp:",  node(), Node}),
             send_monitor(S#state.monitor, {nodeup, Node}, S#state.sync_state),
             GroupName = rpc:call(Node, global, get_s_group_name, []), 
             global_name_server ! {nodeup, GroupName, Node},
             {noreply, S};
-        _ ->
-            handle_node_up(Node,S)
-    end;            
+    %%     _ ->
+    %%         handle_node_up(Node,S)
+    %% end;      
+
 handle_info({nodeup, Node}, S) ->  %% Need to test!!!
     ?debug({"NodeUp:",  node(), Node}),
     case  rpc:call(Node, global, get_s_group_name, []) of 
         no_group ->
+            ?debug({"s_group_name:", no_group}),
             handle_node_up(Node, S);
         GroupName ->
+            ?debug({"s_group_name:", GroupName}),
             send_monitor(S#state.monitor, {nodeup, Node}, S#state.sync_state),
             GroupName = rpc:call(Node, global, get_s_group_name, []), 
             global_name_server ! {nodeup, GroupName, Node},
@@ -1198,6 +1219,7 @@ handle_node_up(Node, S) ->
     NSE = lists:delete(Node, S#state.sync_error),
     case shared_s_groups_match(OwnNGs, OthersNG) of 
         true->
+            ?debug("Same s_ group match.\n"),
             %% OwnGroups =  S#state.group_names,
             OthersGroups = element(1, lists:unzip(OthersNG)),
             CommonGroups = intersection(OwnGroups, OthersGroups),
@@ -1221,6 +1243,7 @@ handle_node_up(Node, S) ->
                                 sync_error = NSE}}
 	    end;
 	false ->
+            ?debug("Same s_ group NOT match.\n"),
             case {lists:member(Node, get_own_nodes()), 
 	          lists:member(Node, S#state.sync_error)} of
 	        {true, false} ->
@@ -1265,9 +1288,6 @@ code_change(_OldVsn, State, _Extra) ->
     {ok, State}.
 
 
-
-
-
 %%%====================================================================================
 %%% Check the global group configuration.
 %%%====================================================================================
@@ -1306,7 +1326,7 @@ config_scan(MyNode, [GrpTuple|NodeGrps], MyOwnNodeGrps, OtherNodeGrps) ->
     end.
 
 grp_tuple({Name, Nodes}) ->
-    {Name, normal, Nodes};
+    {Name, hidden, Nodes};   %% for s_groups, hidden is the default!!!
 grp_tuple({Name, hidden, Nodes}) ->
     {Name, hidden, Nodes};
 grp_tuple({Name, normal, Nodes}) ->
@@ -1653,7 +1673,7 @@ own_group() ->
 		    no_group;
                 {ok, OwnSGroups, _OtherSGroups} ->
                     NodesDef = lists:append([Nodes||{_, _, Nodes}<-OwnSGroups]),
-                    {normal, NodesDef}
+                    {hidden, NodesDef}   %% All s_groups are hidden?
             end
     end.
  
@@ -1670,7 +1690,7 @@ publish_on_nodes(normal, {normal, _}) ->
 publish_on_nodes(hidden, {_, Nodes}) ->
     Nodes;
 publish_on_nodes(_, {hidden, Nodes}) ->
-    Nodes.
+    Nodes
 
 %%%====================================================================================
 %%% Update net_kernels publication list
@@ -1707,7 +1727,6 @@ mk_new_s_group_conf(GroupName, Nodes0) ->
             end
     end.
 
-
 rm_s_group_from_conf(GroupName) ->
     case application:get_env(kernel, s_groups) of
         undefined ->
@@ -1734,3 +1753,16 @@ rm_s_group_nodes_from_conf(GroupName,NodesToRm) ->
                                      {GroupName, NewGroupNodes})
             end
     end.
+
+known_s_group_names(Nodes) ->
+    lists:foldl(fun(Node, Acc) ->
+                        case rpc:call(Node, s_group, s_groups, []) of
+                            {badrpc, _} ->
+                                [];
+                            undefined -> 
+                                Acc;
+                            {G, Gs} -> 
+                                [G|Gs]++Acc
+                        end
+                end, [], Nodes).
+                            
