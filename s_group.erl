@@ -61,9 +61,9 @@
 
 -define(cc_vsn, 2).
 
-%%-define(debug(_), ok).
+-define(debug(_), ok).
 
--define(debug(T), erlang:display({node(), {line,?LINE}, T})).
+%%-define(debug(T), erlang:display({node(), {line,?LINE}, T})).
 %%%====================================================================================
 
 -type publish_type() :: 'hidden' | 'normal'.
