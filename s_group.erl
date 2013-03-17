@@ -35,9 +35,6 @@
 -export([send/3]).
 -export([whereis_name/1]).
 -export([whereis_name/2]).
--export([s_groups_changed/1]).
--export([s_groups_added/1]).
--export([s_groups_removed/1]).
 -export([sync/0]).
 -export([ng_add_check/2, ng_add_check/3]).
 
@@ -164,15 +161,6 @@ whereis_name(Name) ->
       Name :: name().
 whereis_name(Group, Name) ->
     request({whereis_name, Group, Name}).
-
-s_groups_changed(NewPara) ->
-    request({s_groups_changed, NewPara}).
-
-s_groups_added(NewPara) ->
-    request({s_groups_added, NewPara}).
-
-s_groups_removed(NewPara) ->
-    request({s_groups_removed, NewPara}).
 
 -spec sync() -> 'ok'.
 sync() ->
@@ -568,106 +556,6 @@ handle_call({whereis_name, {node, Node}, Name}, From, S) ->
     Wait = get(whereis_name),
     put(whereis_name, [{Pid, From} | Wait]),
     {noreply, S};
-
-
-%%%====================================================================================
-%%% s_groups parameter changed
-%%% The node is not resynced automatically because it would cause this node to
-%%% be disconnected from those nodes not yet been upgraded.
-%%%====================================================================================
-handle_call({s_groups_changed, NewPara}, _From, S) ->
-    %% Need to be changed because of the change of config_scan HL
-    {NewGroupName, PubTpGrp, NewNodes, NewOther} = 
-	case catch config_scan(NewPara, publish_type) of
-	    {error, _Error2} ->
-		exit({error, {'invalid s_groups definition', NewPara}});
-	    {DefGroupName, PubType, DefNodes, DefOther} ->
-		update_publish_nodes(S#state.publish_type, {PubType, DefNodes}),
-		{DefGroupName, PubType, DefNodes, DefOther}
-	end,
-
-    %% #state.nodes is the common denominator of previous and new definition
-    NN = NewNodes -- (NewNodes -- S#state.nodes),
-    %% rest of the nodes in the new definition are marked as not yet contacted
-    NNC = (NewNodes -- S#state.nodes) --  S#state.sync_error,
-    %% remove sync_error nodes not belonging to the new group
-    NSE = NewNodes -- (NewNodes -- S#state.sync_error),
-
-    %% Disconnect the connection to nodes which are not in our old global group.
-    %% This is done because if we already are aware of new nodes (to our global
-    %% group) global is not going to be synced to these nodes. We disconnect instead
-    %% of connect because upgrades can be done node by node and we cannot really
-    %% know what nodes these new nodes are synced to. The operator can always 
-    %% manually force a sync of the nodes after all nodes beeing uppgraded.
-    %% We must disconnect also if some nodes to which we have a connection
-    %% will not be in any global group at all.
-    force_nodedown(nodes(connected) -- NewNodes),
-
-    NewS = S#state{group_names = [NewGroupName], 
-		   nodes = lists:sort(NN), 
-		   no_contact = lists:sort(lists:delete(node(), NNC)), 
-		   sync_error = lists:sort(NSE), 
-		   other_grps = NewOther,
-		   group_publish_type = PubTpGrp},
-    {reply, ok, NewS};
-
-
-%%%====================================================================================
-%%% s_groups parameter added
-%%% The node is not resynced automatically because it would cause this node to
-%%% be disconnected from those nodes not yet been upgraded.
-%%%====================================================================================
-handle_call({s_groups_added, NewPara}, _From, S) ->
-    %%io:format("### s_groups_changed, NewPara ~p ~n",[NewPara]),
-    %% Need to be changed because of the change of config_scan!! HL
-    {NewGroupName, PubTpGrp, NewNodes, NewOther} = 
-	case catch config_scan(NewPara, publish_type) of
-	    {error, _Error2} ->
-		exit({error, {'invalid s_groups definition', NewPara}});
-	    {DefGroupName, PubType, DefNodes, DefOther} ->
-		update_publish_nodes(S#state.publish_type, {PubType, DefNodes}),
-		{DefGroupName, PubType, DefNodes, DefOther}
-	end,
-
-    %% disconnect from those nodes which are not going to be in our global group
-    force_nodedown(nodes(connected) -- NewNodes),
-
-    %% Check which nodes are already updated
-    OwnNG = get_own_nodes(),
-    NGACArgs = case S#state.group_publish_type of
-		   normal ->
-		       [node(), OwnNG];
-		   _ ->
-		       [node(), S#state.group_publish_type, OwnNG]
-	       end,
-    {NN, NNC, NSE} = 
-	lists:foldl(fun(Node, {NN_acc, NNC_acc, NSE_acc}) -> 
-			    case rpc:call(Node, s_group, ng_add_check, NGACArgs) of
-				{badrpc, _} ->
-				    {NN_acc, [Node | NNC_acc], NSE_acc};
-				agreed ->
-				    {[Node | NN_acc], NNC_acc, NSE_acc};
-				not_agreed ->
-				    {NN_acc, NNC_acc, [Node | NSE_acc]}
-			    end
-		    end,
-		    {[], [], []}, lists:delete(node(), NewNodes)),
-    NewS = S#state{sync_state = synced, group_names = [NewGroupName], nodes = lists:sort(NN), 
-		   sync_error = lists:sort(NSE), no_contact = lists:sort(NNC), 
-		   other_grps = NewOther, group_publish_type = PubTpGrp},
-    {reply, ok, NewS};
-
-
-%%%====================================================================================
-%%% s_groups parameter removed
-%%%====================================================================================
-handle_call({s_groups_removed, _NewPara}, _From, S) ->
-    %%io:format("### s_groups_removed, NewPara ~p ~n",[_NewPara]),
-    update_publish_nodes(S#state.publish_type),
-    NewS = S#state{sync_state = no_conf, group_names = [], nodes = [], 
-		   sync_error = [], no_contact = [], 
-		   other_grps = []},
-    {reply, ok, NewS};
 
 
 %%%====================================================================================
