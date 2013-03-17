@@ -627,6 +627,14 @@ handle_call(get_known, _From, S) ->
     GrpNodes = S#state.known,
     {reply, GrpNodes, S};
 
+handle_call({get_known,Group}, _From, S) ->
+    GrpNodes = S#state.known,
+    case lists:keyfind(Group, 1, GrpNodes) of 
+        {Group, Ns} ->
+            {reply, Ns, S};
+        false ->
+            {reply, [], S}
+    end;
 handle_call(get_synced, _From, S) ->
     {reply, S#state.synced, S};
 
@@ -710,6 +718,25 @@ handle_call({remove_s_group_nodes,GroupName, NodesToRm}, _From, S) ->
                         },
             {reply, ok, NewS}
     end;
+handle_call({remove_from_no_group,Node}, _From, S) ->
+    NewKnown = [ case G of
+                     no_group -> {G, Ns--[Node]};
+                     _ -> {G, Ns}
+                 end
+                 ||{G,Ns}<-S#state.known,
+                   {G, Ns} /= {no_group, [Node]}],
+    
+    NewSynced = [ case G of
+                      no_group -> {G, Ns--[Node]};
+                      _ -> {G, Ns}
+                  end
+                  ||{G,Ns}<-S#state.synced,
+                    {G, Ns} /= {no_group, [Node]}],
+    NewS=S#state{known= NewKnown,
+                 synced=NewSynced
+                },
+    {reply, ok, NewS};
+   
 handle_call(Request, From, S) ->
     error_logger:warning_msg("The global_name_server "
                              "received an unexpected message:\n"
@@ -872,7 +899,11 @@ handle_cast({in_sync, Group, Node, _IsKnown}, S) ->
                    {Group, Ss}->
                        lists:keyreplace(Group,1, Synced,{Group, lists:usort([Node|Ss])})
                end,
-    {noreply, NewS#state{synced = NSynced}};
+    NSynced1= case Group of 
+                    no_group -> NSynced;
+                    _ -> remove_no_group(NSynced)
+                end,
+    {noreply, NewS#state{synced = NSynced1}};
 
 %% Called when Pid on other node crashed
 handle_cast({async_del_name, _Name, _Pid}, S) ->
@@ -1000,7 +1031,7 @@ handle_info(Message, S) ->
     {noreply, S}.
 
 handle_node_up(Group, Node, S1) ->
-    ?debug({"handle node up:", Group, Node, S0}),
+    ?debug({"handle node up:", Group, Node, S1}),
     KnownNodes =  case lists:keyfind(Group, 1, S1#state.known) of
                       false -> [];
                       {Group, Ns} -> Ns
@@ -1026,7 +1057,7 @@ handle_node_up(Group, Node, S1) ->
 	    MyTag = now(),
 	    put({sync_tag_my, Node}, MyTag),
             ?trace({sending_nodeup_to_locker, {node,Node},{mytag,MyTag}}),
-	    S2#state.the_locker ! {nodeup, Node, MyTag},
+	    S2#state.the_locker ! {nodeup, {Group, Node}, MyTag},  %%HL; 16/03.
 
             %% In order to be compatible with unpatched R7 a locker
             %% process was spawned. Vsn 5 is no longer compatible with
@@ -1045,6 +1076,7 @@ handle_node_up(Group, Node, S1) ->
             S = trace_message(S2, {new_resolver, Node}, [MyTag, Resolver]),
             {noreply, S#state{resolvers = [{Node, MyTag, Resolver} | Rs]}}
     end.
+
 
 %%========================================================================
 %%========================================================================
@@ -1080,7 +1112,10 @@ trans_all_known(Fun) ->
     end.
 
 set_lock_known(Id, Times) -> 
-    Known = get_known(),
+    %% Known = get_known(), %%HL. 16/03/13
+    Known=lists:usort(
+            lists:append(
+              element(2, lists:unzip(get_known())))),
     Nodes = [node() | Known],
     Boss = the_boss(Nodes),
     %% Use the  same convention (a boss) as lock_nodes_safely. Optimization.
@@ -1102,7 +1137,10 @@ set_lock_known(Id, Times) ->
 lock_on_known_nodes(Id, Known, Nodes) ->
     case set_lock_on_nodes(Id, Nodes) of
         true ->
-            (get_known() -- Known) =:= [];
+            Known1=lists:usort(
+                     lists:append(
+                       element(2, lists:unzip(get_known())))),
+            (Known1 -- Known) =:= [];
         false ->
             false
     end.
@@ -1233,7 +1271,7 @@ resolved(Group, Node, HisResolved, HisKnown, Names_ext, S0) ->
     %% See (*) below... we're node b in that description
     AddedNodes = (NewNodes -- Known),
     NewKnown0 = lists:usort(Known ++ AddedNodes),
-    S4#state.the_locker ! {add_to_known, AddedNodes},
+    S4#state.the_locker ! {add_to_known, [{Group, N}||N<-AddedNodes]},
     NewS = trace_message(S4, {added, AddedNodes}, 
                          [{new_nodes, NewNodes}, {abcast, Known}, {ops,Ops}]),
     ?debug({"NewState:", NewS, {added, AddedNodes}, 
@@ -1243,6 +1281,10 @@ resolved(Group, Node, HisResolved, HisKnown, Names_ext, S0) ->
                    _ -> lists:keyreplace(Group,1, NewS#state.known, 
                                          {Group, NewKnown0})
                end,
+    NewKnown1 = case Group of 
+                    no_group -> NewKnown;
+                    _ -> remove_no_group(NewKnown)
+                end,
     Synced = NewS#state.synced,
     NewSynced = case lists:keyfind(Group, 1, Synced) of 
                     false -> 
@@ -1250,9 +1292,16 @@ resolved(Group, Node, HisResolved, HisKnown, Names_ext, S0) ->
                     {Group, Ss}->
                         lists:keyreplace(Group,1, Synced,{Group, lists:usort([Node|Ss])})
                 end,
-    NewS#state{known = NewKnown, 
-               synced = NewSynced}.
+    NewSynced1= case Group of 
+                    no_group -> NewSynced;
+                    _ -> remove_no_group(NewSynced)
+                end,
+    NewS#state{known = NewKnown1, 
+               synced = NewSynced1}.
 
+remove_no_group(Groups) ->
+    [{G, Ns} || {G, Ns} <- Groups, G/=no_group].
+   
 cancel_resolved_locker(Node, CancelFun) ->
     Tag = get({sync_tag_my, Node}),
     ?trace({calling_cancel_locker,Tag,get()}),
@@ -1272,7 +1321,7 @@ new_nodes(Ops, Group, ConnNode, Names_ext, Nodes, ExtraInfo, S0) ->
     S = do_ops(Ops, ConnNode, Names_ext, ExtraInfo, S0),
     ?trace({added_nodes_in_sync,{added_nodes,AddedNodes}}),
     ?debug({added_nodes_in_sync,{added_nodes,AddedNodes}}),
-    S#state.the_locker ! {add_to_known, AddedNodes},
+    S#state.the_locker ! {add_to_known, [{Group,N}||N<-AddedNodes]},
     S1 = trace_message(S, {added, AddedNodes}, [{ops,Ops}]),
     Known = S1#state.known,
     NewKnown = case lists:keyfind(Group, 1, Known) of 
@@ -1281,7 +1330,24 @@ new_nodes(Ops, Group, ConnNode, Names_ext, Nodes, ExtraInfo, S0) ->
                        lists:keyreplace(Group,1, Known, 
                                         {Group, lists:usort(Ns)++AddedNodes})
                end,
-    S1#state{known = NewKnown}.
+    NewKnown1 = case Group of 
+                    no_group -> NewKnown;
+                    _ -> remove_no_group(NewKnown)
+                end,
+    Synced = S1#state.synced,
+    NewSynced = case lists:keyfind(Group, 1, Synced) of 
+                    false -> 
+                        [{Group, [AddedNodes]}|Synced];
+                    {Group, Ss}->
+                        lists:keyreplace(Group,1, Synced,{Group, lists:usort(AddedNodes++Ss)})
+                end,
+    NewSynced1= case Group of 
+                    no_group -> NewSynced;
+                    _ -> remove_no_group(NewSynced)
+                end,
+    S1#state{known = NewKnown1,
+             synced = NewSynced1
+            }.
 
 do_whereis(Name, From) ->
     case is_global_lock_set() of
@@ -1640,7 +1706,8 @@ start_the_locker(DoTrace) ->
 init_the_locker(DoTrace) ->
     process_flag(trap_exit, true),    % needed?
     S0 = #multi{do_trace = DoTrace},
-    S1 = update_locker_known({add, get_known()}, S0),
+    Known = [{G, N}||{G, Ns}<-get_known(), N<-Ns], %%HL
+    S1 = update_locker_known({add, Known}, S0),
     loop_the_locker(S1),
     erlang:error(locker_exited).
 
@@ -1670,6 +1737,7 @@ loop_the_locker(S) ->
                         end
                 end,
             S1 = S#multi{just_synced = false},
+            ?debug({"TimeOut:", Timeout, S1}),
             receive 
                 Message when element(1, Message) =/= nodeup ->
                     the_locker_message(Message, S1)
@@ -1688,11 +1756,11 @@ the_locker_message({his_the_locker, HisTheLocker, HisKnown0, _MyKnown}, S) ->
     {HisVsn, _HisKnown} = HisKnown0,
     true = HisVsn > 4,
     receive
-        {nodeup, Node, MyTag} when node(HisTheLocker) =:= Node ->
+        {nodeup, {Grp, Node}, MyTag} when node(HisTheLocker) =:= Node ->
             ?trace({the_locker_nodeup, {node,Node},{mytag,MyTag}}),
             Him = #him{node = node(HisTheLocker), my_tag = MyTag,
                        locker = HisTheLocker, vsn = HisVsn},
-            loop_the_locker(add_node(Him, S));
+            loop_the_locker(add_node({Grp, Him}, S));
         {cancel, Node, _Tag, no_fun} when node(HisTheLocker) =:= Node ->
             loop_the_locker(S)
     after 60000 ->
@@ -1728,7 +1796,7 @@ the_locker_message({lock_set, Pid, true, _HisKnown}, S) ->
             LockId = locker_lock_id(Pid, HisVsn),
             {IsLockSet, S1} = lock_nodes_safely(LockId, [], S),
             Pid ! {lock_set, self(), IsLockSet, S1#multi.known},
-            Known2 = [node() | S1#multi.known],
+            Known2 = [node() |lists:usort(element(2,lists:unzip(S1#multi.known)))], %%HL.
             ?trace({the_locker, spontaneous, {known2, Known2},
                     {node,Node}, {is_lock_set,IsLockSet}}),
             case IsLockSet of
@@ -1757,8 +1825,8 @@ the_locker_message({lock_set, Pid, true, _HisKnown}, S) ->
             Pid ! {lock_set, self(), false, S#multi.known},
             loop_the_locker(S)
     end;
-the_locker_message({add_to_known, Nodes}, S) ->
-    S1 = update_locker_known({add, Nodes}, S),
+the_locker_message({add_to_known, GrpNodePairs}, S) ->
+    S1 = update_locker_known({add, GrpNodePairs}, S),
     loop_the_locker(S1);
 the_locker_message({remove_from_known, Node}, S) ->
     S1 = update_locker_known({remove, Node}, S),
@@ -1776,6 +1844,8 @@ select_node(S) ->
     UseRemote = S#multi.local =:= [],
     Others1 = if UseRemote -> S#multi.remote; true -> S#multi.local end,
     Others2 = exclude_known(Others1, S#multi.known),
+    ?debug({"Others1", Others1}),
+    ?debug({"Others2", Others2}),
     S1 = if 
              UseRemote -> S#multi{remote = Others2}; 
              true -> S#multi{local = Others2} 
@@ -1783,12 +1853,12 @@ select_node(S) ->
     if 
         Others2 =:= [] ->
             loop_the_locker(S1);
-        true -> 
-            Him = random_element(Others2),
+        true ->  %% HL;
+            {Grp, Him} = random_element(Others2),
             #him{locker = HisTheLocker, vsn = HisVsn,
                  node = Node, my_tag = MyTag} = Him,
-            HisNode = [Node],
-            Us = [node() | HisNode],
+            HisNode = [{Grp,Node}],
+            Us = [{Grp, node()} | HisNode],
             LockId = locker_lock_id(HisTheLocker, HisVsn),
             ?trace({select_node, self(), {us, Us}}),
             %% HisNode = [Node] prevents deadlock:
@@ -1796,9 +1866,10 @@ select_node(S) ->
             case IsLockSet of
                 true -> 
                     Known1 = Us ++ S2#multi.known,
+                    Known2 = lists:usort(element(2, lists:unzip(Known1))),  %%HL
                     ?trace({sending_lock_set, self(), {his,HisTheLocker}}),
                     HisTheLocker ! {lock_set, self(), true, S2#multi.known},
-                    S3 = lock_is_set(S2, Him, MyTag, Known1, LockId),
+                    S3 = lock_is_set(S2, Him, MyTag, Known2, LockId),
                     loop_the_locker(S3);
                 false ->
                     loop_the_locker(S2)
@@ -1868,25 +1939,30 @@ locker_trace(#multi{do_trace = true}, not_ok, Ns) ->
     global_name_server ! {trace_message, {locker_failed, node()}, Ns};
 locker_trace(#multi{do_trace = true}, rejected, Ns) ->
     global_name_server ! {trace_message, {lock_rejected, node()}, Ns}.
-
+%%HL; 16/03/13
 update_locker_known(S) ->
     receive
-        {add_to_known, Nodes} ->
-            S1 = update_locker_known({add, Nodes}, S),
+        {add_to_known, GrpNodePairs} ->
+            S1 = update_locker_known({add, GrpNodePairs}, S),
             update_locker_known(S1);
         {remove_from_known, Node} ->
             S1 = update_locker_known({remove, Node}, S),
             update_locker_known(S1)
+                
     after 0 ->
             S
     end.
 
 update_locker_known(Upd, S) ->
     Known = case Upd of
-                {add, Nodes} -> Nodes ++ S#multi.known;
-                {remove, Node} -> lists:delete(Node, S#multi.known)
+                {add, GrpNodePairs} ->
+                    GrpNodePairs++S#multi.known;
+                {remove, Node} -> 
+                    [{G, N}
+                     ||{G, N}<-S#multi.known, N/=Node]
             end,
-    TheBoss = the_boss([node() | Known]), 
+    KnownNodes =  element(2, lists:unzip(Known)),
+    TheBoss = the_boss([node() | KnownNodes]), 
     S#multi{known = Known, the_boss = TheBoss}.
 
 random_element(L) ->
@@ -1894,8 +1970,9 @@ random_element(L) ->
     E = (A+B+C) rem length(L),
     lists:nth(E+1, L).
 
+%% HL; 16/03
 exclude_known(Others, Known) ->
-    [N || N <- Others, not lists:member(N#him.node, Known)].
+    [{Grp,N} || {Grp, N} <- Others, not lists:member({Grp, N#him.node}, Known)].
 
 lock_is_set(S, Him, MyTag, Known1, LockId) ->
     Node = Him#him.node,
@@ -1968,9 +2045,10 @@ find_node_tag(Node, S) ->
             Reply
     end.
 
+%% HL; 16/03
 find_node_tag2(_Node, []) ->
     false;
-find_node_tag2(Node, [#him{node = Node, my_tag = MyTag, vsn = HisVsn} | _]) ->
+find_node_tag2(Node, [{_, #him{node = Node, my_tag = MyTag, vsn = HisVsn}} | _]) ->
     {true, MyTag, HisVsn};
 find_node_tag2(Node, [_E | Rest]) ->
     find_node_tag2(Node, Rest).
@@ -1986,12 +2064,12 @@ remove_node2(Node, [#him{node = Node} | Rest]) ->
 remove_node2(Node, [E | Rest]) ->
     [E | remove_node2(Node, Rest)].
 
-add_node(Him, S) ->
+add_node({Group, Him}, S) ->
     case is_node_local(Him#him.node) of
         true ->
-            S#multi{local = [Him | S#multi.local]};
+            S#multi{local=[{Group, Him}|S#multi.local]};
         false ->
-            S#multi{remote = [Him | S#multi.remote]}
+            S#multi{remote=[{Group, Him}|S#multi.remote]}
     end.
 
 is_node_local(Node) ->
@@ -2184,6 +2262,10 @@ get_names_ext() ->
 get_known() ->
     gen_server:call(global_name_server, get_known, infinity).
 
+%%HL; 16/03/13
+get_known(Group) ->
+    gen_server:call(global_name_server, {get_known, Group}, infinity).
+
 random_sleep(Times) ->
     case (Times rem 10) of
 	0 -> erase(random_seed);
@@ -2359,6 +2441,9 @@ remove_s_group(GroupName) ->
 
 remove_s_group_nodes(GroupName, NodesToRm)->
     request({remove_s_group_nodes,GroupName, NodesToRm}).
+
+remove_from_no_group(Node)->
+    request({remove_from_no_group, Node}).
 
 request(Req) ->
     request(Req, infinity).
