@@ -624,8 +624,8 @@ handle_call({del_lock, Lock}, {Pid, _Tag}, S0) ->
     {reply, true, S};
 
 handle_call(get_known, _From, S) ->
-    Nodes = lists:usort(lists:append(element(2, lists:unzip(S#state.known)))),
-    {reply, Nodes, S};
+    GrpNodes = S#state.known,
+    {reply, GrpNodes, S};
 
 handle_call(get_synced, _From, S) ->
     {reply, S#state.synced, S};
