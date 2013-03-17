@@ -999,10 +999,8 @@ handle_info(Message, S) ->
                              "handle_info(~p, _)\n", [Message]),
     {noreply, S}.
 
-handle_node_up(Group, Node, S0) ->
+handle_node_up(Group, Node, S1) ->
     ?debug({"handle node up:", Group, Node, S0}),
-    ?debug({"S0:", S0}),
-    S1 = replace_no_group(Group, S0), %% Test this! HL.
     KnownNodes =  case lists:keyfind(Group, 1, S1#state.known) of
                       false -> [];
                       {Group, Ns} -> Ns
@@ -1047,37 +1045,6 @@ handle_node_up(Group, Node, S0) ->
             S = trace_message(S2, {new_resolver, Node}, [MyTag, Resolver]),
             {noreply, S#state{resolvers = [{Node, MyTag, Resolver} | Rs]}}
     end.
-
-replace_no_group(Group, S) ->  %% is this right? HL; 20/02/13.
-    Known = S#state.known,
-    Synced =S#state.synced,
-    S1=case lists:keyfind(no_group, 1, Known) of
-           false -> S;
-           {no_group, KnownNodes} ->
-               Known1 = lists:keydelete(no_group,1, Known),
-               Known2=case lists:keyfind(Group, 1, Known1) of 
-                          false ->
-                              [{Group, KnownNodes}|Known1];
-                          {Group, Known0}-> 
-                              lists:keyreplace(Group,1, Known1, 
-                                               {Group, lists:usort(KnownNodes++Known0)})
-                      end,
-               S#state{known=Known2}
-       end,
-    case lists:keyfind(no_group, 1, Synced) of
-        false -> S1;
-        {no_group, SyncedNodes} ->
-            Synced1 =lists:keydelete(no_group,1, Synced), 
-            Synced2 =case lists:keyfind(Group, 1, Synced1) of 
-                         false ->
-                             [{Group, SyncedNodes}|Synced1];
-                         {Group, Synced0}-> 
-                             lists:keyreplace(Group,1, Synced1, 
-                                               {Group, lists:usort(SyncedNodes++Synced0)})
-                     end,
-            S1#state{synced=Synced2}
-    end.
-
 
 %%========================================================================
 %%========================================================================
