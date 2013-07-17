@@ -11,7 +11,7 @@
 %% Things to add:
 %%    precondtions for each command. 
 
--module(s_group_eqc).
+-module(s_group_eqc1).
 
 -include_lib("eqc/include/eqc.hrl").
 
@@ -57,10 +57,11 @@
 -type connection()::{node_id(), connection_type()}.
 -type connection_type()::visible|hidden.
 
+%% -type node_type()::visible|hidden. %% toadd.
 
--define(debug, 1).
+-define(debug, 10).
 
-%%-define(debug, -1).
+%% -define(debug, -1).
 -ifdef(debug). 
 dbg(Level, F, A) when Level >= ?debug ->
     io:format("dbg:~p:", [now()]),
@@ -83,7 +84,8 @@ dbg(_, _, _) ->
 prop_s_group() ->
     ?SETUP
        (fun()-> setup(),
-                fun()->teardown() end
+               %% fun()->teardown() end
+                fun()->ok end
         end,
         ?FORALL(Cmds,commands(?MODULE),
                 begin
@@ -146,33 +148,49 @@ make_node_id(N)->
 %% in test sequences if their precondition is also true.
 %%---------------------------------------------------------------
 command(S) ->
-    noshrink(oneof([{call, ?MODULE, register_name,[gen_register_name_pars(S),
+    oneof([{call, ?MODULE,  new_s_group,  [gen_new_s_group_pars(S), all_node_ids(S)]}
+           ,{call, ?MODULE,  add_nodes, [gen_add_nodes_pars(S), all_node_ids(S)]}
+           ,{call, ?MODULE,  remove_nodes, [gen_remove_nodes_pars(S), all_node_ids(S)]}
+           ,{call, ?MODULE,  delete_s_group, [gen_delete_s_group_pars(S), all_node_ids(S)]}
+           ,{call, ?MODULE, register_name,[gen_register_name_pars(S),
                                                    all_node_ids(S)]}
-                    %% {call, ?MODULE, re_register_name, [gen_re_register_name_pars(S),
-                    %%                                    all_node_ids(S)]}
-           %% ,{call, ?MODULE, whereis_name, [gen_whereis_name_pars(S),  all_node_ids(S)]}
-           %% ,{call, ?MODULE, send,[gen_send_pars(S),all_node_ids(S)]}
-          ])).
+           ,{call, ?MODULE, whereis_name, [gen_whereis_name_pars(S),  all_node_ids(S)]}
+           ,{call, ?MODULE, re_register_name, [gen_re_register_name_pars(S),
+                                                        all_node_ids(S)]}
+           ,{call, ?MODULE, unregister_name, [gen_unregister_name_pars(S),
+                                               all_node_ids(S)]}
+           ,{call, ?MODULE, send,[gen_send_pars(S),all_node_ids(S)]}
+          ]).
  
 %%---------------------------------------------------------------
 %% precondition: returns true if the symbolic call C can be performed 
 %% in the state S. Preconditions are used to decide whether or not to 
 %% include candidate commands in test cases
 %%---------------------------------------------------------------
-precondition(_S, {call, ?MODULE, register_name,
-                  [{RegName, _SGroupName, Pid, CurNode}, _AllNodeIds]}) ->
-    proc_is_alive(CurNode, Pid) andalso   RegName/=undefined;
-
-precondition(_S, {call, ?MODULE, re_register_name,
-                  [{RegName, _SGroupName, Pid, CurNode}, _AllNodeIds]}) ->
-    proc_is_alive(CurNode, Pid) andalso  RegName/=undefined;
-
+precondition(_S, {call, ?MODULE, new_s_group,
+                  [{_SGroupName, NodeIds, _CurNode}, _AllNodeIds]}) ->
+    NodeIds/=[];
+precondition(_S, {call, ?MODULE, add_nodes,
+                  [{SGroupName, NodeIds, _CurNode}, _AllNodeIds]}) ->
+    SGroupName/=undefined andalso NodeIds/=[];
+precondition(_S, {call, ?MODULE, remove_nodes,
+                  [{SGroupName, NodeIds, _CurNode}, _AllNodeIds]}) ->
+   SGroupName/=undefined andalso NodeIds/=[];
+precondition(_S, {call, ?MODULE, delete_s_group,
+                  [{SGroupName,_CurNode}, _AllNodeIds]}) ->
+    SGroupName/=undefined;
 precondition(S, {call, ?MODULE, whereis_name, 
                  [{_NodeId, _RegName, _SGroupName, 
                    _CurNode}, _AllNodeIds]}) ->
     Model = S#state.model,
     Grps = Model#model.groups,
-    Grps/=[]; 
+    (Grps/=[]); 
+precondition(_S, {call, ?MODULE, re_register_name,
+                  [{RegName, _SGroupName, Pid, CurNode}, _AllNodeIds]}) ->
+    proc_is_alive(CurNode, Pid) andalso  RegName/=undefined;
+precondition(_S, {call, ?MODULE, unregister_name,
+                  [{_RegName, _SGroupName, _CurNode}, _AllNodeIds]}) ->
+    true;
 precondition(S, {call, ?MODULE, send, 
                   [{_NodeId, _RegName, _SGroupName, _Msg, 
                    _CurNode}, _AllNodeIds]}) ->
@@ -193,47 +211,65 @@ precondition(_S, _C) ->
 %% checked during test execution, not test generation.
 %%---------------------------------------------------------------
 %% Here the state 'S' is the state before the call.
+
+postcondition(S, {call, ?MODULE, new_s_group,
+                  [{SGroupName, NodeIds, CurNode}, _AllNodeIds]},
+             {Res, ActualState}) ->
+    {NodesAdded, NewS} = new_s_group_next_state(S,SGroupName, NodeIds, CurNode),
+    (NodesAdded == Res) and 
+        is_the_same(ActualState, NewS) and
+        prop_partition(NewS);
+postcondition(_S, {call, ?MODULE, add_nodes,
+                  [{_SGroupName, _NodeIds, _CurNode}, _AllNodeIds]},
+              {_Res, _ActualState}) ->
+    true;
+postcondition(_S, {call, ?MODULE, remove_nodes,
+                  [{_SGroupName, _NodeIds, _CurNode}, _AllNodeIds]},
+              {_Res, _ActualState}) ->
+    true;
+postcondition(_S, {call, ?MODULE, delete_s_group,
+                  [{_SGroupName, _CurNode}, _AllNodeIds]},
+              {_Res, _ActualState}) ->
+    true;
 postcondition(S,  {call, ?MODULE, register_name, 
                    [{RegName, SGroupName, Pid, _CurNode}, _AllNodeIds]},
               {Res, ActualState}) ->
-    ?dbg(10, "Cmd:~p\n", [{call, ?MODULE, register_name,
-                            [{RegName, SGroupName, Pid}]}]),
+    io:format("PostCond Cmd:~p\n", [{call, ?MODULE, register_name,
+                             [{RegName, SGroupName, Pid}]}]),
     Model = S#state.model,
     Grps=Model#model.groups,
     case lists:keyfind(SGroupName,1, Grps) of 
         {SGroupName, NodeIds, NameSpace} ->
             case lists:keyfind(RegName, 1, NameSpace) of 
                 {RegName, _} ->
-                    ?dbg(0, "Name already used.\n",[]),
-                    Res==no andalso
-                        is_the_same(ActualState,S);
+                    is_the_same(ActualState,S) and (Res==no);
                 false ->
-                    ?dbg(0, "Name is fresh.\n", []),
+                    %% io:format("Name is fresh.\n"),
                     case lists:keyfind(Pid,2,NameSpace) of 
                         {_, Pid} ->
-                            ?dbg(0, "Pid is already registered.\n", []),
-                            Res==no andalso is_the_same(ActualState,S);
+                            is_the_same(ActualState,S) and (Res==no);
                         false ->
-                            ?dbg(0, "NameSpace:~p\n", [NameSpace]),
-                            ?dbg(0, "Pid is NOT registered.\n", []),
+                            ?dbg(10, "NameSpace:~p\n", [NameSpace]),
+                            ?dbg(10, "Pid is NOT registered.\n", []),
                             NewGrp={SGroupName,NodeIds, [{RegName, Pid}|NameSpace]},
                             NewGrps = lists:keyreplace(SGroupName, 1, Grps, NewGrp),
                             NewModel =Model#model{groups=NewGrps},
                             ?dbg(0,"NewModel:~p\n", [NewModel#model.groups]),
                             NewS=S#state{model=NewModel},
-                            Res==yes andalso is_the_same(ActualState,NewS) 
-                                andalso prop_partition(NewS)
+                            (Res==yes) andalso is_the_same(ActualState,NewS) 
+                                 andalso prop_partition(NewS)
                         end
             end;
         false ->
             ?dbg(0, "Invalid s_group name.\n", []),
-            (Res==no)  and
+            (Res==no) and
                 is_the_same(ActualState,S)
     end;
+
 postcondition(S,  {call, ?MODULE, re_register_name, 
                    [{RegName, SGroupName, Pid, _CurNode}, _AllNodeIds]},
               {Res, ActualState}) ->
-    ?dbg(10, "PostCmd:~p\n", [{call, ?MODULE, re_register_name,
+    io:format("PostCmd:~p\n", [{call, ?MODULE, re_register_name,
                             [{RegName, SGroupName, Pid}]}]),
     Model = S#state.model,
     Grps=Model#model.groups,
@@ -241,18 +277,18 @@ postcondition(S,  {call, ?MODULE, re_register_name,
         {SGroupName, NodeIds, NameSpace} ->
             case lists:keyfind(Pid,2,NameSpace) of 
                 {_, Pid} ->  %% Maybe this should be allow?!!
-                    ?dbg(10, "Pid is already registered.\n", []),
+                    ?dbg(0, "Pid is already registered.\n", []),
                     Res==no andalso is_the_same(ActualState,S);
                 false ->
-                    ?dbg(10, "NameSpace:~p\n", [NameSpace]),
-                    ?dbg(10, "Pid is NOT registered.\n", []),
+                    ?dbg(0, "NameSpace:~p\n", [NameSpace]),
+                    ?dbg(0, "Pid is NOT registered.\n", []),
                     NewNameSpace= [{RegName, Pid}|
                                    lists:keydelete(RegName, 1, NameSpace)],
                     NewGrp={SGroupName,NodeIds, NewNameSpace},
                     NewGrps = lists:keyreplace(
                                 SGroupName, 1, Grps, NewGrp),
                     NewModel = Model#model{groups=NewGrps},
-                    ?dbg(10,"NewModel:~p\n", [NewModel#model.groups]),
+                    ?dbg(0, "NewModel:~p\n", [NewModel#model.groups]),
                     NewS=S#state{model=NewModel},
                     Res==yes andalso is_the_same(ActualState,NewS) 
                         andalso prop_partition(NewS)
@@ -262,16 +298,56 @@ postcondition(S,  {call, ?MODULE, re_register_name,
             (Res==no)  and
                 is_the_same(ActualState,S)
     end;
+
+postcondition(S,  {call, ?MODULE, unregister_name, 
+                   [{RegName, SGroupName,_CurNode}, _AllNodeIds]},
+              {Res, ActualState}) ->
+    io:format("PostCond Cmd:~p\n", [{call, ?MODULE, unregister_name,
+                             [{RegName, SGroupName}]}]),
+    Model = S#state.model,
+    Grps=Model#model.groups,
+    case lists:keyfind(SGroupName,1, Grps) of 
+        {SGroupName, NodeIds, NameSpace} ->
+            case lists:keyfind(RegName, 1, NameSpace) of
+                false ->
+                    is_the_same(ActualState,S) and (Res==ok);
+                {RegName, _} ->
+                    ?dbg(10, "NameSpace:~p\n", [NameSpace]),
+                    NewNameSpace= lists:keydelete(RegName, 1, NameSpace),
+                    NewGrp={SGroupName,NodeIds, NewNameSpace},
+                    NewGrps = lists:keyreplace(
+                                SGroupName, 1, Grps, NewGrp),
+                    NewModel = Model#model{groups=NewGrps},
+                    ?dbg(0,"NewModel:~p\n", [NewModel#model.groups]),
+                    NewS=S#state{model=NewModel},
+                    (Res==ok) andalso is_the_same(ActualState,NewS) 
+                        andalso prop_partition(NewS)
+            end;
+        false ->
+            ?dbg(0, "Invalid s_group name.\n", []),
+            (Res==ok) and
+                is_the_same(ActualState,S)
+    end;
+postcondition(_S, {call, ?MODULE, whereis_name, 
+                   [{_TargetNodeId, undefined, _GroupName, _CurNode}, _AllNodeIds]},
+              {_Res, _ActualState}) ->
+    true;
 postcondition(S, {call, ?MODULE, whereis_name, 
                    [{TargetNodeId, RegName, GroupName, CurNode}, _AllNodeIds]},
               {Res, ActualState}) ->
     Pid = find_name(S#state.model, TargetNodeId, GroupName,RegName), 
     NewS=whereis_name_next_state(S, CurNode, TargetNodeId),
-    Pid == Res andalso is_the_same(ActualState, NewS);   
+    (Pid == Res) and is_the_same(ActualState, NewS);
 postcondition(_S, {call, ?MODULE, send, 
-                   [{_NodeId, _RegName, _SGroupName, _Msg,_CurNode}, _AllNodeIds]},
+                   [{_TargetNodeId, undefined, _GroupName, _Msg, _CurNode}, _AllNodeIds]},
               {_Res, _ActualState}) ->
     true;
+postcondition(S, {call, ?MODULE, send, 
+                   [{TargetNodeId, RegName, GroupName, _Msg,CurNode}, _AllNodeIds]},
+              {Res,ActualState}) ->
+    Pid = find_name(S#state.model, TargetNodeId, GroupName,RegName), 
+    NewS=whereis_name_next_state(S, CurNode, TargetNodeId),
+    (Pid == Res) and is_the_same(ActualState, NewS);
 postcondition(_S, _C, _R) ->
     true.
 
@@ -281,15 +357,11 @@ postcondition(_S, _C, _R) ->
 %% and it is used during both test generation and test execution.
 %%---------------------------------------------------------------
 %%-spec(next_state(S::#state{}, R::var(), C::call()) -> #state{}).
-
-%% TOfix: this does not update its ?? 
 next_state(S, _V, {call, ?MODULE, register_name, 
                    [{RegName, SGroupName, Pid, _CurNode}, _AllNodeIds]}) ->
-    ?dbg(10, "State Cmd:~p\n", [{call, ?MODULE, register_name,
-                           [{RegName, SGroupName, Pid}]}]),
     Model = S#state.model,
     #model{groups=Grps}=Model,
-    case lists:keyfind(SGroupName, 1, Grps) of 
+    NewS=case lists:keyfind(SGroupName, 1, Grps) of 
         {SGroupName, NodeIds, NameSpace} -> 
             case lists:keyfind(RegName, 1, NameSpace) of 
                 {RegName, _} ->
@@ -309,7 +381,9 @@ next_state(S, _V, {call, ?MODULE, register_name,
                     end
             end;
              false -> S
-    end;
+         end,
+    ?dbg(0, "Next state:~p\n",[(NewS#state.model)#model.groups]),
+    NewS;
 next_state(S, _V, {call, ?MODULE, re_register_name, 
                    [{RegName, SGroupName, Pid, _CurNode}, _AllNodeIds]}) ->
     ?dbg(0, "State Cmd:~p\n", [{call, ?MODULE, register_name,
@@ -318,38 +392,93 @@ next_state(S, _V, {call, ?MODULE, re_register_name,
     #model{groups=Grps}=Model,
     case lists:keyfind(SGroupName, 1, Grps) of 
         {SGroupName, NodeIds, NameSpace} -> 
-            case lists:keyfind(RegName, 1, NameSpace) of 
-                {RegName, _} ->
+            case lists:keyfind(Pid,2,NameSpace) of 
+                {_, Pid} -> 
                     S;
                 false ->
-                    case lists:keyfind(Pid,2,NameSpace) of 
-                        {_, Pid} -> 
-                            S;
-                        false ->
-                            NewNameSpace= [{RegName, Pid}|
-                                           lists:keydelete(RegName, 1, NameSpace)],
-                            NewGrp={SGroupName,NodeIds, NewNameSpace},
-                            NewGrps = lists:keyreplace(
-                                        SGroupName, 1, Grps, NewGrp),
-                            NewModel = Model#model{groups=NewGrps},
-                            S#state{model=NewModel};
-                        _ -> S
-                    end
+                    NewNameSpace= [{RegName, Pid}|
+                                   lists:keydelete(RegName, 1, NameSpace)],
+                    NewGrp={SGroupName,NodeIds, NewNameSpace},
+                    NewGrps = lists:keyreplace(
+                                SGroupName, 1, Grps, NewGrp),
+                    NewModel = Model#model{groups=NewGrps},
+                    S#state{model=NewModel};
+                _ -> S
             end;
         false -> S
     end;
+next_state(S, _V, {call, ?MODULE, unregister_name, 
+                   [{RegName, SGroupName, _CurNode}, _AllNodeIds]}) ->
+    Model = S#state.model,
+    Grps=Model#model.groups,
+    case lists:keyfind(SGroupName,1, Grps) of 
+        {SGroupName, NodeIds, NameSpace} ->
+            case lists:keyfind(RegName, 1, NameSpace) of
+                false ->
+                    S;
+                {RegName, _} ->
+                    ?dbg(10, "NameSpace:~p\n", [NameSpace]),
+                    NewNameSpace= lists:keydelete(RegName, 1, NameSpace),
+                    NewGrp={SGroupName,NodeIds, NewNameSpace},
+                    NewGrps = lists:keyreplace(
+                                SGroupName, 1, Grps, NewGrp),
+                    NewModel = Model#model{groups=NewGrps},
+                    ?dbg(0,"NewModel:~p\n", [NewModel#model.groups]),
+                    S#state{model=NewModel}
+            end;
+        false ->
+            S
+    end;
 next_state(S, _V, {call, ?MODULE, whereis_name,  
-                   [{TargetNode, _RegName, _SGroupName,
-                     CurNode},_AllNodeIds]}) ->
+                   [{TargetNode, RegName, _SGroupName,
+                     CurNode},_AllNodeIds]}) when RegName/=undefined  ->
     whereis_name_next_state(S, CurNode, TargetNode);
 
-next_state(S, _V, {call, ?MODULE, send,  
-                   [{_NodeId, _RegName, _SGroupName, _Msg,
+next_state(S, _V, {call, ?MODULE, send,
+                   [{_TargetNode, undefined, _SGroupName, _Msg,
                      _CurNode}, _AllNodeIds]}) ->
     S;
+next_state(S, _V, {call, ?MODULE, send,  
+                   [{TargetNode, _RegName, _SGroupName, _Msg,
+                     CurNode}, _AllNodeIds]}) ->
+    whereis_name_next_state(S, CurNode, TargetNode);
 next_state(S, _V, _) ->
     S.
 
+
+new_s_group_next_state(S,SGroupName, NodeIds, CurNode) ->
+    case lists:member(CurNode, NodeIds) of 
+        false ->
+            {[], S};
+        true ->
+            new_s_group_next_state_1(S,SGroupName, NodeIds)
+    end.
+new_s_group_next_state_1(S,SGroupName, NodeIds) ->
+    Model =S#state.model,
+    #model{groups=Grps, free_groups = Fgs,
+           free_hidden_groups=Fhgs,nodes=Nodes}=Model,
+    NewNodes=[add_connections_and_group_to_nodes(N, NodeIds, SGroupName)||N<-Nodes],
+    NewGrps = [{SGroupName, NodeIds, []}|Grps],
+    NewFgs = remove_nodes_from_fgps(NodeIds, Fgs),
+    NewFhgs= remove_nodes_from_fhgps(NodeIds, Fhgs),
+    NewModel =Model#model{groups=NewGrps, free_groups=NewFgs,
+                          free_hidden_groups=NewFhgs,
+                          nodes = NewNodes},
+    {NodeIds, S#state{model=NewModel}}.
+    
+add_connections_and_group_to_nodes(CurNode, NodeIds, SGroupName) -> 
+    {CurNodeId, Conns, GrpNames}=CurNode,
+    NewGrpNames=[SGroupName|GrpNames],
+    NewConns =[{Id, visible}||Id<-NodeIds, Id=/=CurNodeId],
+    {CurNodeId, Conns++NewConns, NewGrpNames}.    
+
+remove_nodes_from_fgps(NodeIds, Fgs) ->
+    [{NodeIds1--NodeIds, NameSpace}||{NodeIds1, NameSpace}<-Fgs].
+
+remove_nodes_from_fhgps(NodeIds, Fgs) ->
+    [{NodeId, NameSpace}||{NodeId, NameSpace}<-Fgs, not lists:member(NodeId, NodeIds)].
+
+whereis_name_next_state(S, CurNode, TargetNode) when CurNode==TargetNode -> S;
 whereis_name_next_state(S, CurNode, TargetNode) ->
     #model{nodes=Nodes}=Model=S#state.model,
     {CurNode, CurConns, CurGrps} = lists:keyfind(CurNode, 1, Nodes),
@@ -395,7 +524,7 @@ prop_partition(S) ->
         sets:intersection(FreeNodes, FreeHiddenNodes)==Empty andalso
         lists:sort(sets:to_list(sets:union([GrpNodes, FreeNodes, FreeHiddenNodes])))== 
         lists:sort(AllNodeIds),
-    ?dbg(0, "partititon_prop:~p\n", [Res]),
+    ?dbg(200, "partititon_prop:~p\n", [Res]),
     Res.
 
 %% TO ADD:
@@ -411,13 +540,20 @@ register_name({RegName, SGroupName, Pid, Node}, AllNodes) ->
                  [RegName,SGroupName, Pid]),
     State=fetch_node_states(AllNodes),
     {Res, State}.
-    
 re_register_name({RegName, SGroupName, Pid, Node}, AllNodes) ->
     Res=rpc:call(Node, s_group, re_register_name, 
                  [RegName,SGroupName, Pid]),
     State=fetch_node_states(AllNodes),
-    {Res, State}.
-  
+    {Res, State}. 
+unregister_name({RegName, SGroupName,Node}, AllNodes) ->
+    Res=rpc:call(Node, s_group, unregister_name, 
+                 [RegName,SGroupName]),
+    State=fetch_node_states(AllNodes),
+    io:format("unregister_name Res:~p\n", [Res]),
+    {Res, State}. 
+whereis_name({_NodeId, undefined, _SGroupName, _Node}, AllNodes)->
+    State =fetch_node_states(AllNodes),
+    {undefined, State};
 whereis_name({NodeId, RegName, SGroupName, Node}, AllNodes)->
     Res=rpc:call(Node, s_group, whereis_name,
                  [NodeId, RegName, SGroupName]),
@@ -482,11 +618,11 @@ connections(NodeId) ->
     Hiddens =rpc:call(NodeId, erlang, nodes, [hidden]),
     [{Id, visible}||Id<-Visibles] ++ 
         [{Id, hidden}||Id<-Hiddens].
-        %% [{Id, hidden}||Id<-Hiddens--['eqc@127.0.0.1']].
                     
+%% function registered_names_with_pids is not defined in 
+%% global.erl at the moment; to be added.
 fetch_name_space(NodeId) ->
     NameSpace=rpc:call(NodeId,global, registered_names_with_pids, []),
-    ?dbg(0,"NameSpace:~p\n", [NameSpace]),
     lists:sort(NameSpace).
 
 publish_arg(NodeId) ->
@@ -513,7 +649,7 @@ analyze_free_nodes(FreeNodes)->
 %% This should be more strict!!!
 analyze_group_nodes(GroupNameNodesPairs) ->
     F = fun(NodeIds, GrpName) ->
-                NameSpace=[[{Name, Pid}||{Name, Grp, Pid}<-
+                NameSpace=[[{Name, Pid}||{Grp, Name, Pid}<-
                                              fetch_name_space(Id), Grp==GrpName]
                            || Id<-NodeIds],
                 sets:to_list(sets:from_list(lists:append(NameSpace)))
@@ -521,10 +657,36 @@ analyze_group_nodes(GroupNameNodesPairs) ->
     [{GroupName, Nodes,  F(Nodes, GroupName)}||{GroupName, Nodes}<-GroupNameNodesPairs].
 
 is_the_same(State, AbstractState) ->
-    ActualModel =normalise_model(to_model(State)),
+    Model = to_model(State),
+    ActualModel =normalise_model(Model),
+    %% io:format("ActualModel:~p\n", [ActualModel]),
     AbstractModel=normalise_model(AbstractState#state.model),
-    ?dbg(0, "SameNodes:~p\n", [ActualModel#model.nodes==AbstractModel#model.nodes]),
-    ?dbg(0, "SameSGroups:~p\n", [ActualModel#model.groups==AbstractModel#model.groups]),
+    %% io:format("AbstractModel:~p\n", [AbstractModel]),
+    ?dbg(200, "SameNodes:~p\n", [ActualModel#model.nodes==AbstractModel#model.nodes]),
+    case ActualModel#model.nodes==AbstractModel#model.nodes of 
+        false ->
+            Zip=lists:zip(ActualModel#model.nodes, AbstractModel#model.nodes),
+            [case 
+                 N1==N2 of 
+                 true -> ok;
+                 false ->io:format("N1:~p\n", [N1]),
+                         io:format("N2:~p\n", [N2])
+             end||{N1, N2}<- Zip],
+            io:format("Actual:~p\n", [{length(ActualModel#model.nodes), 
+                                      ActualModel#model.nodes}]),
+            io:format("Abstract~p\n", [{length(AbstractModel#model.nodes),
+                                       AbstractModel#model.nodes}]);
+        _ -> ok
+    end,
+    ?dbg(200, "SameSGroups:~p\n", [ActualModel#model.groups==AbstractModel#model.groups]),
+    case ActualModel#model.groups==AbstractModel#model.groups of 
+        false ->
+             io:format("Actual:~p\n", [ActualModel#model.groups]),
+            io:format("Abstract:~p\n", [AbstractModel#model.groups]);
+        true -> ok
+    end,
+    %% io:format("Actual:~p\n", [ActualModel#model.groups]),
+    %% io:format("Abstract:~p\n", [AbstractModel#model.groups]),
     IsTheSame=(ActualModel==AbstractModel),
     ?dbg(10, "Is the same:~p\n", [IsTheSame]),
     IsTheSame.
@@ -533,11 +695,12 @@ normalise_model(Model) ->
     Groups = Model#model.groups,
     FreeGroups = Model#model.free_groups,
     FreeHiddenGroups = Model#model.free_hidden_groups,
-    Nodes = Model#model.nodes,
+    Nodes  = Model#model.nodes,
     Groups1=lists:keysort(
               1, [{GrpName, lists:usort(NodeIds), 
                    lists:usort(NameSpace)}
                   ||{GrpName, NodeIds, NameSpace}<-Groups]),
+    %% io:format("Groups1:~p\n", [Groups1]),
     FreeGroups1 = lists:keysort(
                     1, [{lists:usort(Ids), lists:usort(NameSpace)}
                         ||{Ids, NameSpace}<-FreeGroups]),
@@ -547,10 +710,11 @@ normalise_model(Model) ->
     Nodes1 = lists:keysort(
                1, [{Id, lists:usort(Conns), lists:usort(GrpNames)}
                    ||{Id, Conns, GrpNames}<-Nodes]),
-    #model{groups = Groups1, 
+    Res=#model{groups = Groups1, 
            free_groups = FreeGroups1,
            free_hidden_groups = FreeHiddenGroups1,
-           nodes = Nodes1}.
+               nodes = Nodes1},
+    Res.
            
                          
 %%---------------------------------------------------------------
@@ -558,6 +722,55 @@ normalise_model(Model) ->
 %% Generators.
 %%---------------------------------------------------------------
 %% How to solve the dependency between parameters?
+gen_new_s_group_pars(S=#state{model=Model}) ->
+    #model{free_groups = Fgs, free_hidden_groups=Fhgs}=Model,
+    FreeNormalNodes = sets:from_list(
+                        lists:append(
+                          [NodeIds||{NodeIds,_}<-Fgs])),
+    FreeHiddenNodes=sets:from_list(
+                      [NodeId||{NodeId, _NameSpace}<-Fhgs]),
+    FreeNodes = FreeNormalNodes++ FreeHiddenNodes,
+    ?LET(NodeIds, lists:usort(eqc_gen:list(eqc_gen:oneof(FreeNodes))),
+         ?LET(CurNode, eqc_gen:oneof(NodeIds),
+              {gen_s_group_name(S), NodeIds, CurNode})).
+
+gen_add_nodes_pars(_S=#state{ref=Ref, model=Model}) ->
+    #model{groups=Grps, free_groups = Fgs,
+           free_hidden_groups=Fhgs}=Model,
+    if Grps==[] orelse Ref==[] ->
+            {undefined, undefined, undefined};
+       true ->
+            FreeNormalNodes = sets:from_list(
+                                lists:append(
+                                  [NodeIds||{NodeIds,_}<-Fgs])),
+            FreeHiddenNodes=sets:from_list(
+                              [NodeId||{NodeId, _NameSpace}<-Fhgs]),
+            FreeNodes = FreeNormalNodes++ FreeHiddenNodes,
+            ?LET({GrpName, NodeIds, _Namespace}, eqc_gen:oneof(Grps),
+                 ?LET(CurNode, eqc_gen:oneof(NodeIds),
+                      ?LET(NodeIds1, lists:usort(eqc_gen:list(eqc_gen:oneof(FreeNodes))),
+                           {GrpName, NodeIds1, CurNode})))
+    end.
+gen_remove_nodes_pars(_S=#state{ref=Ref, model=Model}) ->
+    Grps=Model#model.groups,
+    if Grps==[] orelse Ref==[] ->
+            {undefined, undefined, undefined};
+       true ->
+            ?LET({GrpName, NodeIds, _Namespace}, eqc_gen:oneof(Grps),
+                 ?LET(CurNode, eqc_gen:oneof(NodeIds),
+                      ?LET(NodeIds1, lists:usort(eqc_gen:list(eqc_gen:oneof(NodeIds))),
+                           {GrpName, NodeIds1, CurNode})))
+    end.
+gen_delete_s_group_pars(_S=#state{ref=Ref, model=Model}) ->
+    Grps=Model#model.groups,
+    if Grps==[] orelse Ref==[] ->
+            {undefined, undefined};
+       true ->
+            ?LET({GrpName, NodeIds, _Namespace}, eqc_gen:oneof(Grps),
+                  ?LET(CurNode, eqc_gen:oneof(NodeIds),
+                       {GrpName, CurNode}))
+    end.
+                      
 gen_register_name_pars(_S=#state{ref=Ref, model=Model}) ->
     Grps=Model#model.groups,
     if Grps==[] orelse Ref==[] ->
@@ -570,7 +783,6 @@ gen_register_name_pars(_S=#state{ref=Ref, model=Model}) ->
                             oneof(element(2, lists:keyfind(NodeId, 1, Ref))),
                             NodeId})))
     end.
-
 
 gen_re_register_name_pars(_S=#state{ref=Ref, model=Model}) ->
     Grps=Model#model.groups,
@@ -585,6 +797,17 @@ gen_re_register_name_pars(_S=#state{ref=Ref, model=Model}) ->
                             NodeId})))
     end.
 
+gen_unregister_name_pars(_S=#state{ref=Ref, model=Model}) ->
+    Grps=Model#model.groups,
+    if Grps==[] orelse Ref==[] ->
+            {undefined, undefined, undefined};
+       true ->
+            ?LET({GrpName, NodeIds, Namespace}, eqc_gen:oneof(Grps),
+                 ?LET(NodeId, eqc_gen:oneof(NodeIds),
+                      ?LET(Name, gen_reg_name(Namespace),
+                           {Name, GrpName, NodeId})))
+    end.
+
 gen_whereis_name_pars(_S=#state{model=Model}) ->
     Grps=Model#model.groups,
     FreeGrps = [{free_normal_group, Ids, NS}||
@@ -594,9 +817,14 @@ gen_whereis_name_pars(_S=#state{model=Model}) ->
     AllGrps = Grps++FreeGrps++HiddenGrps,
     ?LET({GrpName, NodeIds, NameSpace},
          eqc_gen:oneof(AllGrps),
-         {eqc_gen:oneof(NodeIds), 
-          eqc_gen:oneof(element(1,lists:unzip(NameSpace))),
-          GrpName}).
+         ?LET(CurNode, oneof(NodeIds),
+              {eqc_gen:oneof(NodeIds), 
+               eqc_gen:oneof(case element(1,lists:unzip(NameSpace)) of 
+                                 [] -> [undefined];
+                                 Ns -> Ns
+                             end),
+               GrpName,
+               CurNode})).
 
 gen_send_pars(_S=#state{ref=_Ref, model=Model}) ->
     Grps=Model#model.groups,
@@ -607,10 +835,20 @@ gen_send_pars(_S=#state{ref=_Ref, model=Model}) ->
     AllGrps = Grps++FreeGrps++HiddenGrps,
     ?LET({GrpName, NodeIds, NameSpace},
          eqc_gen:oneof(AllGrps),
-         {eqc_gen:oneof(NodeIds),
-          eqc_gen:oneof(element(1,lists:unzip(NameSpace))),
-          GrpName, gen_message()}).
+         ?LET(CurNode, oneof(NodeIds),
+              {eqc_gen:oneof(NodeIds),
+               eqc_gen:oneof(case element(1,lists:unzip(NameSpace)) of 
+                                 [] -> [undefined];
+                                 Ns -> Ns
+                             end),
+               GrpName, 
+               gen_message(),
+               CurNode})).
 
+gen_s_group_name(_S=#state{model=Model}) ->
+    Grps=Model#model.groups,
+    GrpNames= [GrpName||{GrpName, _, _}<-Grps],
+    ?SUCHTHAT(Name, gen_reg_name(),  not lists:member(Name, GrpNames)).
 gen_reg_name()->
     eqc_gen:non_empty(eqc_gen:list(eqc_gen:choose(97, 122))).
    
@@ -619,7 +857,6 @@ gen_reg_name(NameSpace) ->
     NameCandidates=[atom_to_list(N)||N<-UsedNames]++
         ["aa", "bb", "cc", "dd", "ee", "ff"],
     eqc_gen:oneof(NameCandidates).
-
 
 gen_message() ->
     eqc_gen:binary().
@@ -647,9 +884,8 @@ setup()->
     os:cmd(Cmd++" -name node12@127.0.0.1"++Str),
     os:cmd(Cmd++" -name node13@127.0.0.1"++Str),
     os:cmd(Cmd++" -name node14@127.0.0.1"++Str),
-    io:format("ddd\n"),
-    timer:sleep(2000).
-   
+    timer:sleep(2000),
+    fun()->ok end.
             
 teardown()->
    F=fun(N) ->
@@ -716,12 +952,14 @@ find_name(Model, NodeId, GroupName, RegName) ->
                         FreeGrps = Model#model.free_groups,
                         [NS||{Ids, NS}<-FreeGrps, lists:member(NodeId, Ids)];
                     _ ->
-                        Grps = Model#model.groups,
-                        [NS||{GrpName, _Ids, NS}<-Grps, GrpName==GroupName]
+                        Grps1 = Model#model.groups,
+                        [NS||{GrpName, _Ids, NS}<-Grps1, GrpName==GroupName]
                 end,
     case lists:keyfind(RegName, 1, NameSpace) of 
         {RegName, Pid} -> Pid;  %% Note: this pid may not have the node info!
-        _ -> undefined
+        _ ->
+            %% io:format("Info:~p\n", [{Model, NodeId, GroupName, RegName}]),
+            undefined
     end.
     
 
@@ -753,6 +991,10 @@ proc_is_alive(Node, Pid) ->
     rpc:call(Node, erlang, process_info, [Pid])/=undefined.
 
 
+%% cmd to start testing:
+%% eqc:quickcheck(s_group_eqc1:prop_s_group()). 
+
+
 %%---------------------------------------------------------------%%
 %%                                                               %%
 %%                        Notes                                  %%
@@ -771,3 +1013,21 @@ proc_is_alive(Node, Pid) ->
 
 %% Have a process when a process died during the testing. 
 %% TODO: check how the test model update its own pids list.
+
+
+%% 17/07/2013
+%% 1) new version of sgroup:register_name always returns no. 
+%% 2) old version (a month ago), global:register_name always returns no.
+%% 3) whereis does not chech 'undefined' case; but not something hard to describe.
+%% 4) when testing 'whereis_name', sometimes some nodes goes down automatically, not sure what happened.
+%% 5) re_register name does not remove the old tuple from the abstract model if the name is already used.
+%% 6) naming: un_register_name -> unregister_name.
+%% 7) unregister_name returns True in abstract model, but return ok in actual mode.
+%% 8) the function send(pid, msg) is not defined in s_group, so I tested the specification that is 
+%% 9). new_s_group: no name conflict checking?
+%%    commented out.
+
+
+
+%% new_s_group:: differences from global group:
+%% 1) does not meger name space, instead starting from a empty name space. 

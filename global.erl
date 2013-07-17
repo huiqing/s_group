@@ -118,7 +118,7 @@
 %%-----------------------------------------------------------------
 -type group_name()  :: atom().
 -type group_tuple() :: {GroupName :: group_name(), [node()]}.
-                 
+                  
 -record(state, {connect_all        :: boolean(),
 		known = []         :: [group_tuple()],
 		synced = []        :: [group_tuple()],
