@@ -50,14 +50,14 @@
 
 -type free_hidden_group()::{node_id(), namespace()}. 
   
--type a_node()::{node_id(), connections(), gr_names()}.
+-type a_node()::{node_id(), node_type(), connections(), gr_names()}.
 -type gr_names()::free_normal_group|free_hidden_group|[s_group_name()].
 
 -type connections()::[connection()].
 -type connection()::{node_id(), connection_type()}.
 -type connection_type()::visible|hidden.
 
-%% -type node_type()::visible|hidden. %% toadd.
+-type node_type()::visible|hidden. 
 
 -define(debug, 10).
 
@@ -148,10 +148,10 @@ make_node_id(N)->
 %% in test sequences if their precondition is also true.
 %%---------------------------------------------------------------
 command(S) ->
-    oneof([{call, ?MODULE,  new_s_group,  [gen_new_s_group_pars(S), all_node_ids(S)]}
-           ,{call, ?MODULE,  add_nodes, [gen_add_nodes_pars(S), all_node_ids(S)]}
-           ,{call, ?MODULE,  remove_nodes, [gen_remove_nodes_pars(S), all_node_ids(S)]}
-           ,{call, ?MODULE,  delete_s_group, [gen_delete_s_group_pars(S), all_node_ids(S)]}
+     oneof([{call, ?MODULE, new_s_group,  [gen_new_s_group_pars(S), all_node_ids(S)]}
+           ,{call, ?MODULE, add_nodes, [gen_add_nodes_pars(S), all_node_ids(S)]}
+           ,{call, ?MODULE, remove_nodes, [gen_remove_nodes_pars(S), all_node_ids(S)]}
+           ,{call, ?MODULE, delete_s_group, [gen_delete_s_group_pars(S), all_node_ids(S)]}
            ,{call, ?MODULE, register_name,[gen_register_name_pars(S),
                                                    all_node_ids(S)]}
            ,{call, ?MODULE, whereis_name, [gen_whereis_name_pars(S),  all_node_ids(S)]}
@@ -219,18 +219,27 @@ postcondition(S, {call, ?MODULE, new_s_group,
     (NodesAdded == Res) and 
         is_the_same(ActualState, NewS) and
         prop_partition(NewS);
-postcondition(_S, {call, ?MODULE, add_nodes,
-                  [{_SGroupName, _NodeIds, _CurNode}, _AllNodeIds]},
-              {_Res, _ActualState}) ->
-    true;
-postcondition(_S, {call, ?MODULE, remove_nodes,
-                  [{_SGroupName, _NodeIds, _CurNode}, _AllNodeIds]},
-              {_Res, _ActualState}) ->
-    true;
-postcondition(_S, {call, ?MODULE, delete_s_group,
-                  [{_SGroupName, _CurNode}, _AllNodeIds]},
-              {_Res, _ActualState}) ->
-    true;
+postcondition(S, {call, ?MODULE, add_nodes,
+                   [{SGroupName, NodeIds, CurNode}, _AllNodeIds]},
+              {Res, ActualState}) ->
+    {Res1, NewS}=add_nodes_next_state(S,SGroupName, NodeIds, CurNode),
+    (Res1 == Res) and 
+        is_the_same(ActualState, NewS) and
+        prop_partition(NewS);
+postcondition(S, {call, ?MODULE, remove_nodes,
+                  [{SGroupName, NodeIds, CurNode}, _AllNodeIds]},
+              {Res, ActualState}) ->
+    {Res1,NewS}=remove_nodes_next_state(S,SGroupName, NodeIds, CurNode),
+    (Res1 == Res) and 
+        is_the_same(ActualState, NewS) and
+        prop_partition(NewS);
+postcondition(S, {call, ?MODULE, delete_s_group,
+                  [{SGroupName, CurNode}, _AllNodeIds]},
+              {Res, ActualState}) ->
+    NewS=delete_s_group_next_state(S,SGroupName, CurNode),
+    (ok == Res) and 
+        is_the_same(ActualState, NewS) and
+        prop_partition(NewS);
 postcondition(S,  {call, ?MODULE, register_name, 
                    [{RegName, SGroupName, Pid, _CurNode}, _AllNodeIds]},
               {Res, ActualState}) ->
@@ -357,6 +366,20 @@ postcondition(_S, _C, _R) ->
 %% and it is used during both test generation and test execution.
 %%---------------------------------------------------------------
 %%-spec(next_state(S::#state{}, R::var(), C::call()) -> #state{}).
+next_state(S, _V, {call, ?MODULE, new_s_group,
+               [{SGroupName, NodeIds, CurNode}, _AllNodeIds]}) ->
+    {_NodesAdded, NewS} = new_s_group_next_state(S,SGroupName, NodeIds, CurNode),
+    NewS;
+next_state(S, _V, {call, ?MODULE, delete_s_group,
+               [{SGroupName, CurNode}, _AllNodeIds]}) ->
+    delete_s_group_next_state(S,SGroupName, CurNode);
+
+next_state(S, _V, {call, ?MODULE, add_nodes,
+                  [{SGroupName, NodeIds, CurNode}, _AllNodeIds]}) ->
+    add_nodes_next_state(S, SGroupName, NodeIds, CurNode);
+next_state(S, _V, {call, ?MODULE, remove_nodes,
+                  [{SGroupName, NodeIds, CurNode}, _AllNodeIds]}) ->
+    remove_nodes_next_state(S, SGroupName, NodeIds, CurNode);
 next_state(S, _V, {call, ?MODULE, register_name, 
                    [{RegName, SGroupName, Pid, _CurNode}, _AllNodeIds]}) ->
     Model = S#state.model,
@@ -445,7 +468,9 @@ next_state(S, _V, {call, ?MODULE, send,
 next_state(S, _V, _) ->
     S.
 
-
+%=======================================================
+% new_s_group next state.
+%=======================================================
 new_s_group_next_state(S,SGroupName, NodeIds, CurNode) ->
     case lists:member(CurNode, NodeIds) of 
         false ->
@@ -478,6 +503,156 @@ remove_nodes_from_fgps(NodeIds, Fgs) ->
 remove_nodes_from_fhgps(NodeIds, Fgs) ->
     [{NodeId, NameSpace}||{NodeId, NameSpace}<-Fgs, not lists:member(NodeId, NodeIds)].
 
+%=======================================================
+% delete_s_group next state.
+%=======================================================
+delete_s_group_next_state(S,SGroupName, CurNode)->
+    Model =S#state.model,
+    #model{groups=Grps, free_groups = Fgs,
+           free_hidden_groups=Fhgs,nodes=Nodes}=Model,
+    case lists:keysearch(SGroupName, Grps) of
+        {SGroupName, NodeIds, _NS} ->
+            case lists:member(CurNode, NodeIds) of 
+                true -> 
+                    NewGrps = lists:keydelete(SGroupName, 1, Grps),
+                    Nodes1 = remove_s_group_from_nodes(NodeIds, SGroupName, Nodes),
+                    {NewFgs, NewFhgs, NewNodes}= new_free_nodes(Fgs, Fhgs, Nodes1),
+                    NewModel =Model#model{groups=NewGrps, free_groups=NewFgs,
+                                          free_hidden_groups=NewFhgs,
+                                          nodes = NewNodes},
+                    S#state{model=NewModel};
+                false ->
+                    S
+            end;
+        false ->
+            S
+    end.
+
+remove_s_group_from_nodes(Nodes,SGroupName,AllNodes) ->
+    [case lists:member(NodeName, Nodes) of 
+         true ->
+             {NodeName, NodeType, Conns, Grps--[SGroupName]};
+         false ->
+             {NodeName, NodeType, Conns, Grps}
+     end
+     ||{NodeName, NodeType, Conns, Grps}<-AllNodes].
+
+new_free_nodes(Fgs, Fhgs, Nodes) ->
+    NewFreeNodes=[{NodeName, NodeType, Conns, group_name(NodeType)}
+                  ||{NodeName, NodeType, Conns, []}<-Nodes],
+    NewGhgs=add_free_hidden_group(Fhgs, NewFreeNodes),
+    {NewFgs, NewNodes} = add_free_normal_groups(Fgs, Nodes, NewFreeNodes),
+    {NewFgs, NewGhgs, NewNodes}.
+    
+
+group_name(hidden) ->
+    free_hidden_group;
+group_name(normal) ->
+    free_normal_group.
+    
+add_free_hidden_group(Fhgs, NewFreeNodes)-> %%are these names really unregistered?
+    NewFhgs=[{NodeName,[]}||{NodeName, hidden, _, _}<-NewFreeNodes],
+    Fhgs++NewFhgs.
+
+add_free_normal_groups(Fgs, AllNodes, NewFreeNodes)->
+    NewFreeNodeIds=[Id||{Id, _, _, _}<-NewFreeNodes],
+    ConnIds = lists:usort(lists:append([ConnId||{_Id, _NodeType, Conns, _NS}
+                                                   <-NewFreeNodes, 
+                                               {ConnId, _}<-Conns])),
+    GrpConnIds = [ConnId ||ConnId<-ConnIds,{Ids, _}<-Fgs, 
+                         lists:member(ConnId, Ids)],
+    {NewFghs, NewNodes} = merge_free_normal_groups(NewFreeNodeIds, GrpConnIds, Fgs, AllNodes),
+    {NewFghs, NewNodes}.
+
+merge_free_normal_groups([], _GrpConnIds, Fgs, AllNodes)->
+    {Fgs, AllNodes};
+merge_free_normal_groups(NewFreeNodeIds, [], Fgs, AllNodes) ->
+    {[{NewFreeNodeIds, {}}|Fgs], AllNodes};
+merge_free_normal_groups(NewFreeNodeIds, GrpConnIds, Fgs, AllNodes)->
+    FgsToMerge=find_free_normal_grps(GrpConnIds, Fgs),
+    {NewGrpNodes0, NewGrpNameSpace0}=lists:unzip(FgsToMerge),
+    NewGrpNodes=lists:usort(NewFreeNodeIds++NewGrpNodes0),
+    NewNameSpace=lists:usort(lists:append(NewGrpNameSpace0)),  %%TO FIX!!! keysort?
+    NewGrps = (Fgs--FgsToMerge) ++ [{NewGrpNodes,  NewNameSpace}],
+    NewNodes = inter_connect_nodes(NewGrpNodes,AllNodes),
+    {NewGrps, NewNodes}.
+    
+find_free_normal_grps(GrpConnIds, Fgs)->
+    [{NodeIds, NS}||{NodeIds, NS}<-Fgs, 
+                    NodeIds -- GrpConnIds/=[]].
+    
+    
+inter_connect_nodes(NewGrpNodes, AllNodes) ->
+    [case lists:member(Id, NewGrpNodes) of 
+         true -> 
+             {Id, NodeType, lists:usort(Conns++NewGrpNodes--[Id]), Grps};              
+         false ->
+             {Id, NodeType, Conns, Grps}
+     end||{Id, NodeType, Conns, Grps}<-AllNodes].
+    
+
+%=======================================================
+% whereis_name next state.
+%=======================================================
+add_nodes_next_state(S, SGroupName, NodeIds, CurNode)->
+    Model =S#state.model,
+    #model{groups=Grps, free_groups = Fgs,
+           free_hidden_groups=Fhgs,nodes=Nodes}=Model,
+    Grp=[{GrpName, Ids, NS}||{GrpName, Ids, NS}<-Grps,
+                             GrpName==SGroupName],
+    case Grp of 
+        [] ->
+            {error, s_group_does_not_exist};
+        {SGroupName, Ids, NS} ->
+            case lists:member(CurNode, Ids) of 
+                false ->
+                    {error, current_node_not_s_group_member};
+                true ->
+                    NewGrpNodeIds = lists:usort(Ids++NodeIds),
+                    NewNodes=inter_connect_nodes(NewGrpNodeIds, Nodes),
+                    NewGrp={SGroupName, NewGrpNodeIds, NS},
+                    NewGrps= lists:keyreplace(SGroupName, 1, Grps, NewGrp),
+                    NewFgs = remove_nodes_from_fgps(NodeIds, Fgs),
+                    NewFhgs= remove_nodes_from_fhgps(NodeIds, Fhgs),
+                    NewModel =Model#model{groups=NewGrps, free_groups=NewFgs,
+                                          free_hidden_groups=NewFhgs,
+                          nodes = NewNodes},
+                    {NodeIds, S#state{model=NewModel}}
+            end
+    end.
+%=======================================================
+% whereis_name next state.
+%=======================================================
+remove_nodes_next_state(S, SGroupName, NodeIds, CurNode)->
+    Model =S#state.model,
+    #model{groups=Grps, free_groups = Fgs,
+           free_hidden_groups=Fhgs,nodes=Nodes}=Model,
+    Grp=[{GrpName, Ids, NS}||{GrpName, Ids, NS}<-Grps,
+                             GrpName==SGroupName],
+    case Grp of 
+        [] ->
+            {error, s_group_does_not_exist};
+        {SGroupName, Ids, NS} ->
+            case lists:member(CurNode, Ids) of 
+                false ->
+                    {error, current_node_not_s_group_member};
+                true ->
+                    NewNodes=remove_s_group_from_nodes(NodeIds,SGroupName, Nodes),
+                    NewGrpNodeIds = Ids -- NodeIds,
+                    NewGrp={SGroupName, NewGrpNodeIds, NS},
+                    NewGrps= lists:keyreplace(SGroupName, 1, Grps, NewGrp),
+                    {NewFgs, NewFhgs, NewNodes}= new_free_nodes(Fgs, Fhgs, NewNodes),
+                    NewModel =Model#model{groups=NewGrps, free_groups=NewFgs,
+                                          free_hidden_groups=NewFhgs,
+                                          nodes = NewNodes},
+                    {ok, S#state{model=NewModel}}
+            end
+    end.
+    
+    
+%=======================================================
+% whereis_name next state.
+%=======================================================
 whereis_name_next_state(S, CurNode, TargetNode) when CurNode==TargetNode -> S;
 whereis_name_next_state(S, CurNode, TargetNode) ->
     #model{nodes=Nodes}=Model=S#state.model,
@@ -1016,8 +1191,12 @@ proc_is_alive(Node, Pid) ->
 
 
 %% 17/07/2013
-%% 1) new version of sgroup:register_name always returns no. 
+%% 1) new version of sgroup:register_name always returns no. (parameter swapped). 
 %% 2) old version (a month ago), global:register_name always returns no.
+%% NC comments that once a node belong to a s_group, global:register_name cannot be used anymore.
+%% IMO, this is a bit restrictive. With global_groups, one can still use global:register even of 
+%% a node belongs to a global group, I think this is a better choice, after all the fact the 
+%% a node belongs to one or more s_groups only mean the scope of 'global' is limited.
 %% 3) whereis does not chech 'undefined' case; but not something hard to describe.
 %% 4) when testing 'whereis_name', sometimes some nodes goes down automatically, not sure what happened.
 %% 5) re_register name does not remove the old tuple from the abstract model if the name is already used.
@@ -1026,8 +1205,6 @@ proc_is_alive(Node, Pid) ->
 %% 8) the function send(pid, msg) is not defined in s_group, so I tested the specification that is 
 %% 9). new_s_group: no name conflict checking?
 %%    commented out.
-
-
-
 %% new_s_group:: differences from global group:
-%% 1) does not meger name space, instead starting from a empty name space. 
+%% 1) does not merge name space, instead starting from a empty name space. 
+%% 1) once a node belongs to an s_group, global:register_name can no longer be used.
