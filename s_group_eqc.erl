@@ -53,7 +53,7 @@
 
 -compile(export_all).
 
-%% eqc callbacks
+%% eqc callbacksial
 -export([initial_state/0, 
          command/1,
          precondition/2,
@@ -80,15 +80,19 @@
 -type connections()::[node_id()].
 -type node_type()::visible|hidden. 
 
--record(state, {ref  =[]  ::[{pid(),[node_id()],[tuple()]}], 
-                model     ::#model{}
-               }).
+-record(state, {ref  =[]  ::[{node_id, [pid()],list(),[node_id()],
+                               normal|hidden}],
+                 model     ::#model{}
+                }).
 
 -define(debug, 0).
 
 -define(with_conf, false).
 
 -define(cmd, "c:/erl5.9.1/bin/erl ").
+
+-define(NN, 14).  %% number of nomal nodes.
+-define(NH, 2).   %% number of hidden nodes.
 
 -ifdef(debug). 
 dbg(Level, F, A) when Level >= ?debug ->
@@ -147,17 +151,9 @@ initial_state() ->
 -spec initial_state(WithConf::boolean())->#state{}.
 initial_state(WithConf)->
     ?dbg(0, "calling initial state ...\n", []),
-    NodeIds = [make_node_id(N)||N<-lists:seq(1,14)],
-    FreeHiddenGrps = [{make_node_id(N), []}
-                      ||N<-[9, 10]], 
-    FreeNormalGrps = 
-        if WithConf ->
-                [{[make_node_id(N)], []}||N<-[11, 12,13,14]];
-           true ->
-                [{[make_node_id(N)], []}
-                 ||N<-(lists:seq(1, 8)
-                       ++lists:seq(11, 14))]
-        end,
+    NodeIds = [make_node_id(N)||N<-lists:seq(1,?NN+?NH)],
+    FreeHiddenGrps = [{make_node_id(?NN+N), []}
+                      ||N<-lists:seq(1, ?NH)], 
     Grps = if WithConf ->
                    {ok, [Config]} = file:consult("s_group.config"),
                    {kernel, Kernel}=lists:keyfind(kernel, 1, Config),
@@ -169,6 +165,15 @@ initial_state(WithConf)->
                     [{Name, Nids, []}||{Name, _, Nids}<-Grps];
                true -> []
             end,
+    FreeNormalGrps = 
+        if WithConf ->
+                GrpNodes = lists:usort(lists:append([Nids||{_, _, Nids}<-Grps])),
+                FreeNodes =NodeIds -- GrpNodes,
+                [{N, []}||N<-FreeNodes]; 
+           true ->
+                [{[make_node_id(N)], []}
+                 ||N<-lists:seq(1, ?NN)]
+        end,
     NodeStates=fetch_node_states(NodeIds),
     Nodes = [{NodeId, PublishType, Conns, 
               get_grps(NodeId, PublishType, Grps)}
@@ -178,8 +183,9 @@ initial_state(WithConf)->
                  free_groups = FreeNormalGrps,
                  free_hidden_groups=FreeHiddenGrps,
                  nodes=Nodes},
-    #state{ref=NodeStates, model=Model}.
+    #state{model=Model}.
 
+    
 make_node_id(N)->
     list_to_atom("node"++integer_to_list(N)++"@127.0.0.1").
     
@@ -198,26 +204,28 @@ get_grps(NodeId, PublishType, Grps) ->
 %% by using command(S) repeatedly. However, generated calls are only included 
 %% in test sequences if their precondition is also true.
 %%---------------------------------------------------------------
+
+%% add setup and shutdown as commands?
 command(S) ->
     frequency(
        [{5, {call, ?MODULE, new_s_group,  
-             [gen_new_s_group_pars(S), all_node_ids(S)]}}
+             gen_new_s_group_pars(S)}}
        ,{5, {call, ?MODULE, add_nodes, 
-             [gen_add_nodes_pars(S), all_node_ids(S)]}}
+             gen_add_nodes_pars(S)}}
        ,{5, {call, ?MODULE, remove_nodes, 
-              [gen_remove_nodes_pars(S), all_node_ids(S)]}}
+              gen_remove_nodes_pars(S)}}
         ,{5, {call, ?MODULE, delete_s_group,
-              [gen_delete_s_group_pars(S), all_node_ids(S)]}}
+              gen_delete_s_group_pars(S)}}
        ,{10,{call, ?MODULE, register_name,
-              [gen_register_name_pars(S), all_node_ids(S)]}}
+              gen_register_name_pars(S)}}
        ,{10,{call, ?MODULE, whereis_name,
-             [gen_whereis_name_pars(S),  all_node_ids(S)]}}
+             gen_whereis_name_pars(S)}}
        ,{10,{call, ?MODULE, re_register_name, 
-              [gen_re_register_name_pars(S), all_node_ids(S)]}}
+              gen_re_register_name_pars(S)}}
        ,{10,{call, ?MODULE, unregister_name,
-              [gen_unregister_name_pars(S), all_node_ids(S)]}}
+              gen_unregister_name_pars(S)}}
         ,{10,{call, ?MODULE, send,
-             [gen_send_pars(S),all_node_ids(S)]}}
+             gen_send_pars(S)}}
        %% node_down_up fails the test, so I remove it for now.
        %%,{1, {call, ?MODULE, node_down_up, 
        %%   [gen_node_down_up_pars(S), all_node_ids(S)]}}
@@ -229,43 +237,36 @@ command(S) ->
 %% include candidate commands in test cases
 %%---------------------------------------------------------------
 precondition(_S, {call, ?MODULE, new_s_group,
-                  [{_SGroupName, NodeIds, _CurNode}, 
-                   _AllNodeIds]}) ->
+                  [_SGroupName, NodeIds, _CurNode]})->
     NodeIds/=[];
 precondition(_S, {call, ?MODULE, add_nodes,
-                  [{SGroupName, NodeIds, _CurNode}, 
-                   _AllNodeIds]}) ->
+                  [SGroupName, NodeIds, _CurNode]}) -> 
     SGroupName/=undefined andalso NodeIds/=[];
 precondition(_S, {call, ?MODULE, remove_nodes,
-                  [{SGroupName, NodeIds, _CurNode}, 
-                   _AllNodeIds]}) ->
+                  [SGroupName, NodeIds, _CurNode]})-> 
     SGroupName/=undefined andalso NodeIds/=[];
 precondition(_S, {call, ?MODULE, delete_s_group,
-                 [{SGroupName,_CurNode}, 
-                  _AllNodeIds]}) ->
+                 [SGroupName,_CurNode]}) -> 
     SGroupName/=undefined;
 precondition(_S, {call, ?MODULE, whereis_name, 
-                 [{_NodeId, _SGroupName, RegName,
-                   _CurNode}, _AllNodeIds]}) ->
+                 [_NodeId, _SGroupName, RegName,
+                   _CurNode]}) ->
     RegName/=undefined;
 precondition(_S, {call, ?MODULE, register_name,
-                  [{_SGroupName, RegName,Pid, CurNode}, 
-                   _AllNodeIds]}) ->
+                  [_SGroupName, RegName,Pid, CurNode]})->
     RegName/=undefined andalso proc_is_alive(CurNode, Pid); 
 precondition(_S, {call, ?MODULE, re_register_name,
-                  [{_SGroupName, RegName, Pid, CurNode}, 
-                   _AllNodeIds]}) ->
+                  [_SGroupName, RegName, Pid, CurNode]}) -> 
     RegName/=undefined andalso proc_is_alive(CurNode, Pid); 
 precondition(_S, {call, ?MODULE, unregister_name,
-                  [{_SGroupName, RegName, _CurNode}, 
-                   _AllNodeIds]}) ->
+                  [_SGroupName, RegName, _CurNode]}) -> 
     RegName/=undefined;
 precondition(_S, {call, ?MODULE, send, 
-                  [{NodeId, _SGroupName, RegName, _Msg, 
-                   _CurNode}, _AllNodeIds]}) ->
+                  [NodeId, _SGroupName, RegName, _Msg, 
+                   _CurNode]}) ->
     NodeId/=undefined andalso RegName/=undefined;
 precondition(_S, {call, ?MODULE, node_down_up, 
-                  [{NodeId}, _AllNodeIds]}) ->
+                  [NodeId]}) ->
     NodeId/=undefined;
 precondition(_S, _C) ->
     true.
@@ -282,70 +283,72 @@ precondition(_S, _C) ->
 %%---------------------------------------------------------------
 %% Here the state 'S' is the state before the call.
 postcondition(S, {call, ?MODULE, new_s_group,
-                  [{SGroupName, NodeIds, CurNode}, _AllNodeIds]},
+                  [SGroupName, NodeIds, CurNode]},
              {Res, ActualState}) ->
+    %% Note: the ActualState here is the non-normalised actual state from 
+    %% each node.
     {AbsRes, NewS} = new_s_group_next_state(S,SGroupName, NodeIds, CurNode),
     (AbsRes == Res) and is_the_same(ActualState, NewS);
 postcondition(S, {call, ?MODULE, add_nodes,
-                   [{SGroupName, NodeIds, CurNode}, _AllNodeIds]},
+                   [SGroupName, NodeIds, CurNode]},
               {Res, ActualState}) ->
     {Res1, NewS}=add_nodes_next_state(S,SGroupName, NodeIds, CurNode),
     (process_result(Res1) == process_result(Res)) and 
         is_the_same(ActualState, NewS);
 postcondition(S, {call, ?MODULE, remove_nodes,
-                  [{SGroupName, NodeIds, CurNode}, _AllNodeIds]},
+                  [SGroupName, NodeIds, CurNode]},
               {Res, ActualState}) ->
     {Res1,NewS}=remove_nodes_next_state(S,SGroupName, NodeIds, CurNode),
     (process_result(Res1) == process_result(Res)) and 
         is_the_same(ActualState, NewS);
 postcondition(S, {call, ?MODULE, delete_s_group,
-                  [{SGroupName, CurNode}, _AllNodeIds]},
+                  [SGroupName, CurNode]},
               {Res, ActualState}) ->
     {AbsRes, NewS}=delete_s_group_next_state(S,SGroupName, CurNode),
     (AbsRes == process_result(Res)) and 
         is_the_same(ActualState, NewS);
 postcondition(S,  {call, ?MODULE, register_name, 
-                   [{SGroupName, RegName, Pid, _CurNode}, _AllNodeIds]},
+                   [SGroupName, RegName, Pid, _CurNode]},
               {Res, ActualState}) ->
     {AbsRes, NewS}=register_name_next_state(S,SGroupName, RegName, Pid),
     (process_result(AbsRes)==process_result(Res)) and
         is_the_same(ActualState, NewS);
 postcondition(S,  {call, ?MODULE, re_register_name, 
-                   [{SGroupName, RegName, Pid, _CurNode}, _AllNodeIds]},
+                   [SGroupName, RegName, Pid, _CurNode]},
               {Res, ActualState}) ->
     {AbsRes, NewS} = re_register_name_next_state(S, SGroupName, RegName, Pid),
     (process_result(AbsRes)==process_result(Res)) and
         is_the_same(ActualState, NewS);
 postcondition(S,  {call, ?MODULE, unregister_name, 
-                   [{SGroupName, RegName, _CurNode}, _AllNodeIds]},
+                   [SGroupName, RegName, _CurNode]},
               {Res, ActualState}) ->
     {AbsRes, NewS} = unregister_name_next_state(S, SGroupName,RegName),
     (process_result(AbsRes)==process_result(Res)) and
         is_the_same(ActualState, NewS);
 postcondition(_S, {call, ?MODULE, whereis_name, 
-                   [{_TargetNodeId,  _GroupName, undefined, _CurNode}, _AllNodeIds]},
+                   [_TargetNodeId,  _GroupName, undefined, _CurNode]},
               {_Res, _ActualState}) ->
     true;
 postcondition(S, {call, ?MODULE, whereis_name, 
-                   [{TargetNodeId, GroupName, RegName, CurNode}, _AllNodeIds]},
+                   [TargetNodeId, GroupName, RegName, CurNode]},
               {Res, ActualState}) ->
     Pid = find_name(S#state.model, TargetNodeId, GroupName,RegName),
     NewS=whereis_name_next_state(S, CurNode, TargetNodeId),
     (Pid == Res) and is_the_same(ActualState, NewS);
 postcondition(_S, {call, ?MODULE, send, 
-                   [{_TargetNodeId,  _GroupName, undefined, _Msg, _CurNode}, _AllNodeIds]},
+                   [_TargetNodeId,  _GroupName, undefined, _Msg, _CurNode]},
               {_Res, _ActualState}) ->
     true;
 postcondition(S, {call, ?MODULE, send, 
-                   [{TargetNodeId, GroupName,RegName, _Msg,CurNode}, _AllNodeIds]},
+                   [TargetNodeId, GroupName,RegName, _Msg,CurNode]},
               {Res,ActualState}) ->
     Pid = find_name(S#state.model, TargetNodeId, GroupName,RegName), 
     NewS=whereis_name_next_state(S, CurNode, TargetNodeId),
-    %% (Pid == Res) and
+    (Pid == Res) and
     is_the_same(ActualState, NewS);
 
 postcondition(S, {call, ?MODULE, node_down_up, 
-                  [{_NodeId}, _AllNodeIds]},
+                  [_NodeId]},
               {_Res,ActualState}) ->
     is_the_same(ActualState, S);
 postcondition(_S, _C, _R) ->
@@ -359,51 +362,51 @@ postcondition(_S, _C, _R) ->
 %%-spec(next_state(S::#state{}, R::var(), C::call()) -> #state{}).
 
 next_state(S, _V, {call, ?MODULE, new_s_group,
-               [{SGroupName, NodeIds, CurNode}, _AllNodeIds]}) ->
-    {_Res, NewS} = new_s_group_next_state(S,SGroupName, NodeIds, CurNode),
-    NewS;
+               [SGroupName, NodeIds, CurNode]}) ->
+     {_Res, NewS} = new_s_group_next_state(S,SGroupName, NodeIds, CurNode),
+      NewS;
 
 next_state(S, _V, {call, ?MODULE, delete_s_group,
-               [{SGroupName, CurNode}, _AllNodeIds]}) ->
+               [SGroupName, CurNode]}) ->
     {_Res, NewS}=delete_s_group_next_state(S,SGroupName, CurNode),
     NewS;
 next_state(S, _V, {call, ?MODULE, add_nodes,
-                  [{SGroupName, NodeIds, CurNode}, _AllNodeIds]}) ->
+                  [SGroupName, NodeIds, CurNode]}) ->
     {_Res, NewS}=add_nodes_next_state(S, SGroupName, NodeIds, CurNode),
     NewS;
 next_state(S, _V, {call, ?MODULE, remove_nodes,
-                  [{SGroupName, NodeIds, CurNode}, _AllNodeIds]}) ->
+                  [SGroupName, NodeIds, CurNode]}) ->
     {_Res, NewS}=remove_nodes_next_state(S, SGroupName, NodeIds, CurNode),
     NewS;
 next_state(S, _V, {call, ?MODULE, register_name, 
-                   [{SGroupName,RegName, Pid, _CurNode}, _AllNodeIds]}) ->
+                   [SGroupName,RegName, Pid, _CurNode]}) ->
     {_Res, NewS}=register_name_next_state(S, SGroupName, RegName, Pid),
     NewS;
 next_state(S, _V, {call, ?MODULE, re_register_name, 
-                   [{SGroupName, RegName, Pid, _CurNode}, _AllNodeIds]}) ->
+                   [SGroupName, RegName, Pid, _CurNode]}) ->
     {_Res, NewS}=re_register_name_next_state(S, SGroupName, RegName, Pid),
     NewS;
 next_state(S, _V, {call, ?MODULE, unregister_name, 
-                   [{SGroupName, RegName, _CurNode}, _AllNodeIds]}) ->
+                   [SGroupName, RegName, _CurNode]}) ->
     {_Res, NewS}=unregister_name_next_state(S,SGroupName, RegName),
     NewS;
 next_state(S, _V, {call, ?MODULE, whereis_name,  
-                   [{TargetNode,_SGroupName, RegName,
-                     CurNode},_AllNodeIds]}) when RegName/=undefined  ->
+                   [TargetNode,_SGroupName, RegName,
+                     CurNode]}) when RegName/=undefined  ->
     whereis_name_next_state(S, CurNode, TargetNode);
 
 next_state(S, _V, {call, ?MODULE, send,
-                   [{_TargetNode, _SGroupName, undefined, _Msg,
-                     _CurNode}, _AllNodeIds]}) ->
+                   [_TargetNode, _SGroupName, undefined, _Msg,
+                     _CurNode]}) ->
     S;
 next_state(S, _V, {call, ?MODULE, send,  
-                   [{TargetNode, _SGroupName, _RegName, _Msg,
-                     CurNode}, _AllNodeIds]}) ->
+                   [TargetNode, _SGroupName, _RegName, _Msg,
+                     CurNode]}) ->
     %%the actual message sending is not modelled in the semantics.
     %%send has the same effect on node states as whereis_name.
     whereis_name_next_state(S, CurNode, TargetNode);
 next_state(S, _V, {call, ?MODULE, node_down_up,
-                   [{_NodeId}, _AllNodeIds]}) ->
+                   [_NodeId]}) ->
     S;  
 next_state(S, _V, _) ->
     S.
@@ -428,8 +431,8 @@ new_s_group_next_state_1(S,SGroupName, NodeIds) ->
     NewFgs = remove_nodes_from_fgps(NodeIds, Fgs),
     NewFhgs= remove_nodes_from_fhgps(NodeIds, Fhgs),
     NewModel =Model#model{groups=NewGrps, free_groups=NewFgs,
-                          free_hidden_groups=NewFhgs,
-                          nodes = NewNodes},
+                      free_hidden_groups=NewFhgs,
+                      nodes = NewNodes},
     {{ok, SGroupName, NodeIds}, S#state{model=NewModel}}.
     
 add_connections_and_group_to_nodes(CurNode, NodeIds, SGroupName) ->
@@ -746,39 +749,41 @@ prop_partition(S) ->
 %%
 %%  Adaptor functions.
 %%---------------------------------------------------------------
-new_s_group({SGroupName, NodeIds, CurNode}, AllNodes)->
+new_s_group(SGroupName, NodeIds, CurNode)->
     rpc_call(CurNode, s_group, new_s_group, 
-                 [SGroupName, NodeIds], AllNodes).
-add_nodes({SGroupName, NodeIds, CurNode}, AllNodes)->
+                 [SGroupName, NodeIds]).
+add_nodes(SGroupName, NodeIds, CurNode)->
     rpc_call(CurNode, s_group, add_nodes, 
-             [SGroupName, NodeIds], AllNodes).    
-remove_nodes({SGroupName, NodeIds, CurNode}, AllNodes)->
+             [SGroupName, NodeIds]).    
+remove_nodes(SGroupName, NodeIds, CurNode)->
     rpc_call(CurNode, s_group, remove_nodes, 
-                 [SGroupName, NodeIds], AllNodes).
+                 [SGroupName, NodeIds]).
  
-delete_s_group({SGroupName, CurNode}, AllNodes)->
+delete_s_group(SGroupName, CurNode)->
     rpc_call(CurNode, s_group, delete_s_group, 
-                 [SGroupName], AllNodes).
+                 [SGroupName]).
   
-register_name({SGroupName, RegName,Pid, Node}, AllNodes) ->
+register_name(SGroupName, RegName,Pid, Node) ->
     rpc_call(Node, s_group, register_name, 
-                 [SGroupName,RegName, Pid], AllNodes).
-re_register_name({SGroupName, RegName, Pid, Node}, AllNodes) ->
+                 [SGroupName, RegName, Pid]).
+re_register_name(SGroupName, RegName, Pid, Node) ->
     rpc_call(Node, s_group, re_register_name, 
-                 [SGroupName,RegName, Pid], AllNodes).    
-unregister_name({SGroupName, RegName,Node}, AllNodes) ->
+                 [SGroupName, RegName, Pid]).    
+unregister_name(SGroupName, RegName,Node) ->
     rpc_call(Node, s_group, unregister_name, 
-                 [SGroupName,RegName], AllNodes).
-whereis_name({_NodeId, _SGroupName, undefined, _Node}, AllNodes)->
+                 [SGroupName,RegName]).
+whereis_name(_NodeId, _SGroupName, undefined, _Node)->
+    AllNodes= [make_node_id(N)||
+                  N <- lists:seq(1,?NN+?NH)],
     State =fetch_node_states(AllNodes),
     {undefined, State};
-whereis_name({NodeId, SGroupName, RegName, Node}, AllNodes)->
+whereis_name(NodeId, SGroupName, RegName, Node)->
     rpc_call(Node, s_group, whereis_name,
-                 [NodeId, SGroupName,RegName], AllNodes).
+                 [NodeId, SGroupName, RegName]).
 
-send({TargetNodeId, SGroupName, RegName, Msg, Node}, AllNodes)->
+send(TargetNodeId, SGroupName, RegName, Msg, Node)->
     rpc_call(Node, s_group, send,
-                 [TargetNodeId, list_to_atom(SGroupName), RegName, Msg], AllNodes).
+                 [TargetNodeId, list_to_atom(SGroupName), RegName, Msg]).
 
 %% node_down_up only test group nodes.
 node_down_up({NodeId}, _AllNodes)->
@@ -794,13 +799,15 @@ node_down_up({NodeId}, _AllNodes)->
     timer:sleep(2000).
  
 
-rpc_call(Node, Module, Fun, Args, AllNodes) ->
-    ?dbg(9, "s_group_eqc:rpc_call(~p, ~p, ~p, ~p).\n", 
-         [Node, Module, Fun, Args]), 
+rpc_call(Node, Module, Fun, Args) ->
+    ?dbg(9, "s_group_eqc:rpc_call(~p, ~p, ~p, ~p).\n",
+          [Node, Module, Fun, Args]),
     Res=rpc:call(Node, Module, Fun, Args),
     ?dbg(9, "rpc_call returned:~p\n", [Res]),
     timer:sleep(2000),
-    State=fetch_node_states(AllNodes),
+    AllNodeIds = [make_node_id(N)||
+                     N <- lists:seq(1,?NN+?NH)],
+    State=fetch_node_states(AllNodeIds),
     {Res, State}.
     
 %%---------------------------------------------------------------
@@ -1041,83 +1048,83 @@ gen_new_s_group_pars(S=#state{model=Model}) ->
     ?LET(NodeIds, gen_nodes(eqc_gen:oneof(AllNodeIds)),
          ?LET(CurNode, eqc_gen:oneof(NodeIds),
               ?LET(GrpName, gen_s_group_name(S),
-              {GrpName, lists:usort(NodeIds), CurNode}))).
+              [GrpName, lists:usort(NodeIds), CurNode]))).
      %% group name is a string here, atom is fine too.
 
 gen_nodes(Nodes) ->
     ?SUCHTHAT(Ns, eqc_gen:list(Nodes), length(Ns)>1).
 
-gen_add_nodes_pars(_S=#state{ref=Ref, model=Model}) ->
+gen_add_nodes_pars(_S=#state{model=Model}) ->
     #model{groups=Grps}=Model,
-    if Grps==[] orelse Ref==[] ->
-            {undefined, undefined, undefined};
+    if Grps==[] ->
+            [undefined, undefined, undefined];
        true ->
             Nodes  = Model#model.nodes,
             AllNodeIds=[Id||{Id, _NodeType, _Conns, _Grps}<-Nodes],
             ?LET({GrpName, NodeIds, _Namespace}, (eqc_gen:oneof(Grps)),
                  ?LET(CurNode, (eqc_gen:oneof(NodeIds)),
                       ?LET(NodeIds1, (eqc_gen:list(gen_oneof(AllNodeIds -- NodeIds))),
-                           {GrpName, lists:usort(NodeIds1), CurNode})))
+                           [GrpName, lists:usort(NodeIds1), CurNode])))
     end.
     
 
-gen_remove_nodes_pars(_S=#state{ref=Ref, model=Model}) ->
+gen_remove_nodes_pars(_S=#state{model=Model}) ->
     Grps=Model#model.groups,
     RealGrps=[{GName, Ids, Ns}||{GName, Ids, Ns}<-Grps, length(Ids)>1],
-    if RealGrps==[] orelse Ref==[] ->
-            {undefined, [], undefined};
+    if RealGrps==[] ->
+            [undefined, [], undefined];
        true ->
             ?LET({GrpName, NodeIds, _Namespace}, (eqc_gen:oneof(RealGrps)),
                  ?LET(CurNode, (eqc_gen:oneof(NodeIds)),
                       ?LET(NodeIds1, (eqc_gen:list(gen_oneof(NodeIds -- [CurNode]))),
-                           {GrpName, lists:usort(NodeIds1), CurNode})))
+                           [GrpName, lists:usort(NodeIds1), CurNode])))
     end.
 
-gen_delete_s_group_pars(_S=#state{ref=Ref, model=Model}) ->
+gen_delete_s_group_pars(_S=#state{model=Model}) ->
     Grps=Model#model.groups,
-    if Grps==[] orelse Ref==[] ->
-            {undefined, undefined};
+    if Grps==[] ->
+            [undefined, undefined];
        true ->
             ?LET({ GrpName, NodeIds, _Namespace}, eqc_gen:oneof(Grps),
                   ?LET(CurNode, eqc_gen:oneof(NodeIds),
-                       {GrpName, CurNode}))
+                       [GrpName, CurNode]))
     end.
                       
-gen_register_name_pars(_S=#state{ref=Ref, model=Model}) ->
+gen_register_name_pars(_S=#state{model=Model}) ->
     Grps=Model#model.groups,
-    if Grps==[] orelse Ref==[] ->
-           {undefined, undefined, undefined, undefined};
+    if Grps==[] ->
+           [undefined, undefined, undefined, undefined];
        true ->
             ?LET({GrpName, NodeIds, _Namespace}, eqc_gen:oneof(Grps),
                  ?LET(NodeId, eqc_gen:oneof(NodeIds),
                       ?LET(Name, gen_reg_name(),
-                           {GrpName, list_to_atom(Name),
-                            eqc_gen:oneof(element(2, lists:keyfind(NodeId, 1, Ref))),
-                            NodeId})))
+                           [GrpName, list_to_atom(Name),
+                            eqc_gen:oneof(get_procs(NodeId)),
+                            NodeId])))
     end.
 
-gen_re_register_name_pars(_S=#state{ref=Ref, model=Model}) ->
+gen_re_register_name_pars(_S=#state{model=Model}) ->
     Grps=Model#model.groups,
-    if Grps==[] orelse Ref==[] ->
-            {undefined, undefined, undefined, undefined};
+    if Grps==[] ->
+            [undefined, undefined, undefined, undefined];
        true ->
             ?LET({GrpName, NodeIds, Namespace}, eqc_gen:oneof(Grps),
                  ?LET(NodeId, eqc_gen:oneof(NodeIds),
                        ?LET(Name, gen_reg_name(Namespace),
-                            {GrpName, list_to_atom(Name),
-                             eqc_gen:oneof(element(2, lists:keyfind(NodeId, 1, Ref))),
-                             NodeId})))
+                            [GrpName, list_to_atom(Name),
+                             eqc_gen:oneof(get_procs(NodeId)),
+                             NodeId])))
     end.
 
-gen_unregister_name_pars(_S=#state{ref=Ref, model=Model}) ->
+gen_unregister_name_pars(_S=#state{model=Model}) ->
     Grps=Model#model.groups,
-    if Grps==[] orelse Ref==[] ->
-            {undefined, undefined, undefined};
+    if Grps==[]->
+            [undefined, undefined, undefined];
        true ->
             ?LET({GrpName, NodeIds, NameSpace}, (eqc_gen:oneof(Grps)),
                  ?LET(NodeId, (eqc_gen:oneof(NodeIds)),
                       ?LET(Name, (gen_oneof(element(1,lists:unzip(NameSpace)))),
-                           {GrpName, Name, NodeId})))
+                           [GrpName, Name, NodeId])))
     end.
 
 gen_whereis_name_pars(_S=#state{model=Model}) ->
@@ -1130,37 +1137,38 @@ gen_whereis_name_pars(_S=#state{model=Model}) ->
     ?LET({GrpName, NodeIds, NameSpace},
          (eqc_gen:oneof(AllGrps)),
          ?LET(CurNode, (eqc_gen:oneof(NodeIds)),
-              {eqc_gen:oneof(NodeIds), 
+              [eqc_gen:oneof(NodeIds), 
                GrpName,
                gen_oneof(element(1,lists:unzip(NameSpace))),
-               CurNode})).
+               CurNode])).
 
-gen_send_pars(_S=#state{ref=_Ref, model=Model}) ->
+gen_send_pars(_S=#state{model=Model}) ->
     Grps=Model#model.groups,
     case Grps of 
         [] ->
-            {undefined, undefined, undefined,
-             undefined,undefined};
+            [undefined, undefined, undefined,
+             undefined,undefined];
         _ ->
             ?LET({GrpName, NodeIds, NameSpace},
                  (eqc_gen:oneof(Grps)),
-                 {eqc_gen:oneof(NodeIds),
+                 [eqc_gen:oneof(NodeIds),
                   GrpName, 
                   gen_oneof(element(1,lists:unzip(NameSpace))),
                   gen_message(),
-                  eqc_gen:oneof(NodeIds)})
+                  eqc_gen:oneof(NodeIds)])
     end.
 
 gen_node_down_up_pars(_S=#state{model=Model}) ->
     Grps=Model#model.groups,
     if Grps==[] ->
-            {undefined};
+            [undefined];
        true ->
             ?LET({_GrpName, NodeIds, _NameSpace},
                  eqc_gen:oneof(Grps),
-                 {eqc_gen:oneof(NodeIds)})
+                 [eqc_gen:oneof(NodeIds)])
     end.
    
+
 gen_s_group_name(_S=#state{model=Model}) ->
     Grps=Model#model.groups,
     GrpNames= [GrpName||{GrpName, _, _}<-Grps],
@@ -1197,20 +1205,12 @@ setup(WithConf)->
                   " -detached -setcookie \"secret\" -config s_group.config";
              true ->" -detached -setcookie \"secret\""
           end,
-    os:cmd(?cmd++" -name node1@127.0.0.1"++Str),
-    os:cmd(?cmd++" -name node2@127.0.0.1"++Str),
-    os:cmd(?cmd++" -name node3@127.0.0.1"++Str),
-    os:cmd(?cmd++" -name node4@127.0.0.1"++Str),
-    os:cmd(?cmd++" -name node5@127.0.0.1"++Str),
-    os:cmd(?cmd++" -name node6@127.0.0.1"++Str),
-    os:cmd(?cmd++" -name node7@127.0.0.1"++Str),
-    os:cmd(?cmd++" -name node8@127.0.0.1"++Str),
-    os:cmd(?cmd++" -name node9@127.0.0.1 -hidden "++Str),
-    os:cmd(?cmd++" -name node10@127.0.0.1 -hidden "++Str),
-    os:cmd(?cmd++" -name node11@127.0.0.1"++Str),
-    os:cmd(?cmd++" -name node12@127.0.0.1"++Str),
-    os:cmd(?cmd++" -name node13@127.0.0.1"++Str),
-    os:cmd(?cmd++" -name node14@127.0.0.1"++Str),
+    [os:cmd(?cmd++" -name node"++integer_to_list(N)
+              ++"@127.0.0.1"++Str)
+     ||N<-lists:seq(1, ?NN)],
+    [os:cmd(?cmd++" -name node"++integer_to_list(?NN+N)
+            ++"@127.0.0.1 -hidden"++Str)
+     ||N<-lists:seq(1, ?NH)],
     timer:sleep(5000),
     fun()->teardown() end.
             
@@ -1253,18 +1253,18 @@ merge_two_free_groups(Model=#model{free_groups=FreeGrps, nodes=Nodes},
     Model#model{free_groups=NewFreeGrps, nodes=NewNodes}.
     
     
-find_name(Model, NodeId, GroupName, RegName) ->
-    Nodes = Model#model.nodes,
+find_name(State, NodeId, GroupName, RegName) ->
+    Nodes = State#model.nodes,
     {NodeId, _,_, Grps} = lists:keyfind(NodeId,1,Nodes),
     [NameSpace]=case Grps of 
                     [free_hidden_group] ->
-                        FreeHiddenGrps=Model#model.free_hidden_groups,
+                        FreeHiddenGrps=State#model.free_hidden_groups,
                         [NS||{Id, NS}<-FreeHiddenGrps, Id==NodeId];
                     [free_normal_group] ->
-                        FreeGrps = Model#model.free_groups,
+                        FreeGrps = State#model.free_groups,
                         [NS||{Ids, NS}<-FreeGrps, lists:member(NodeId, Ids)];
                     _ ->
-                        Grps1 = Model#model.groups,
+                        Grps1 = State#model.groups,
                         [NS||{GrpName, _Ids, NS}<-Grps1, GrpName==GroupName]
                 end,
     case lists:keyfind(RegName, 1, NameSpace) of 
@@ -1427,5 +1427,4 @@ registered_names_with_pids(Node) ->
 %%          this happens to re_register_name as well.
 %%          something wrong in the test code or deadlock?
 %% node down problem: monitor node?
-
 
